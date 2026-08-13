@@ -1,10 +1,16 @@
-.PHONY: sync schemas format lint typecheck test coverage verify
+.PHONY: sync schemas schema-check docs-check format lint typecheck test coverage verify
 
 sync:
 	uv sync --frozen
 
 schemas:
 	uv run --frozen python scripts/generate_schemas.py
+
+schema-check: schemas
+	git diff --exit-code -- schemas
+
+docs-check:
+	uv run --frozen python scripts/check_repository_docs.py
 
 format:
 	uv run --frozen ruff format .
@@ -22,4 +28,4 @@ test:
 coverage:
 	uv run --frozen pytest --cov=upgrade_guard --cov-report=term-missing
 
-verify: schemas lint typecheck coverage
+verify: schema-check docs-check lint typecheck coverage

@@ -34,7 +34,7 @@ def _packages() -> list[dict[str, object]]:
     for distribution in importlib.metadata.distributions():
         name = distribution.metadata.get("Name")
         if name:
-            packages.add(("python", name, distribution.version))
+            packages.add(("pypi", name, distribution.version))
     return [
         {
             "SPDXID": _identifier(kind, name, version),
@@ -50,7 +50,11 @@ def _packages() -> list[dict[str, object]]:
                 {
                     "referenceCategory": "PACKAGE-MANAGER",
                     "referenceType": "purl",
-                    "referenceLocator": f"pkg:{kind}/{name}@{version}",
+                    "referenceLocator": (
+                        f"pkg:pypi/{name}@{version}"
+                        if kind == "pypi"
+                        else f"pkg:deb/debian/{name}@{version}"
+                    ),
                 }
             ],
         }

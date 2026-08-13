@@ -32,6 +32,7 @@ def main() -> None:
         "aa_pilot": state / "aa" / "validation.json",
         "cuda_benchmark": state / "plugin" / "candidate" / "plugin-benchmark.json",
         "gpu_faults": state / "faults" / "validation.json",
+        "reduction_replay": state / "reductions" / "validation.json",
         "memory_seed": state / "memory-seed" / "validation.json",
     }
     values = {name: _json(path) for name, path in required_json.items()}
@@ -42,7 +43,7 @@ def main() -> None:
         value = json.loads((state / "faults" / f"{name}.json").read_text())
         if not value.get("detected") or value.get("control") != "passed":
             raise RuntimeError(f"{name} or its control did not pass")
-    matrix_path = state.parent / "matrix.lock.json"
+    matrix_path = state / "matrix.lock.json"
     matrix = MatrixLock.model_validate_json(matrix_path.read_text(encoding="utf-8"))
     if matrix.computed_sha256() != matrix.lock_sha256:
         raise RuntimeError("remote matrix lock self-hash differs")
@@ -56,6 +57,8 @@ def main() -> None:
         state / "plugin" / "candidate" / "ncu-kernel-summary.csv",
         state / "sbom" / "baseline.spdx.json",
         state / "sbom" / "candidate.spdx.json",
+        state / "sbom" / "host.spdx.json",
+        state / "supply-chain" / "pip-audit.json",
         state / "plugin" / "baseline" / "build" / "compile_commands.json",
         state / "plugin" / "candidate" / "build" / "compile_commands.json",
         state / "plugin" / "candidate" / "build" / "libupgrade_guard_residual_rmsnorm.so",
@@ -95,6 +98,44 @@ def main() -> None:
         json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    table = {
+        "schema_version": "upgradeguard.dev/published-result-table/v1",
+        "status": "passed",
+        "source_git_commit": payload["source_git_commit"],
+        "gpu_uuid": payload["gpu_uuid"],
+        "matrix_lock_sha256": payload["matrix_lock_sha256"],
+        "environment_images": payload["environment_images"],
+        "gate_status": payload["gate_status"],
+        "aa_pilot": values["aa_pilot"],
+        "cuda_benchmark": values["cuda_benchmark"],
+        "gpu_faults": values["gpu_faults"],
+        "memory_seed": values["memory_seed"],
+        "claim_scope": payload["claim_scope"],
+    }
+    (arguments.output.parent / "results.json").write_text(
+        json.dumps(table, allow_nan=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    gate_lines = "\n".join(
+        f"| `{name}` | `{status}` |" for name, status in sorted(payload["gate_status"].items())
+    )
+    report = (
+        "# TensorRT UpgradeGuard qualification report\n\n"
+        "## Observed facts\n\n"
+        f"The source commit is `{payload['source_git_commit']}`.\n"
+        f"The selected GPU UUID is `{payload['gpu_uuid']}`.\n"
+        f"The environment-lock hash is `{payload['matrix_lock_sha256']}`.\n\n"
+        "| Gate | Status |\n"
+        "| --- | --- |\n"
+        f"{gate_lines}\n\n"
+        "## Policy decision\n\n"
+        "Every required gate passed its checked-in policy.\n\n"
+        "## Inference boundary\n\n"
+        f"{payload['claim_scope']}\n\n"
+        "The machine-readable aggregate table is `results.json`.\n"
+        "The hash-addressed evidence index is `evidence.json`.\n"
+    )
+    (arguments.output.parent / "report.md").write_text(report, encoding="utf-8")
 
 
 if __name__ == "__main__":
