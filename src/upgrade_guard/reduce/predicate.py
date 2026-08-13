@@ -48,6 +48,18 @@ class ProfilePredicate(StrictModel):
         return self
 
 
+class PerformancePredicate(StrictModel):
+    """Paired timing evidence and locked repeated-confidence policy."""
+
+    kind: Literal["performance"]
+    baseline_path: str
+    candidate_path: str
+    allowance: float = Field(ge=0)
+    bootstrap_seed: int
+    bootstrap_replicates: int = Field(ge=1000)
+    minimum_pairs: int = Field(ge=20)
+
+
 class ReductionRequest(StrictModel):
     """Bounded reduction session input."""
 
@@ -58,13 +70,16 @@ class ReductionRequest(StrictModel):
     confirmation_count: int = Field(ge=2)
     maximum_trials: int = Field(gt=0)
     maximum_seconds: int = Field(gt=0)
-    predicate: NumericalPredicate | ProfilePredicate = Field(discriminator="kind")
+    predicate: NumericalPredicate | ProfilePredicate | PerformancePredicate = Field(
+        discriminator="kind"
+    )
 
     @model_validator(mode="after")
     def validate_code_matches_predicate(self) -> ReductionRequest:
         expected = {
             "numerical": FailureCode.NUMERICAL_REGRESSION,
             "profile": FailureCode.PROFILE_REJECTED,
+            "performance": FailureCode.PERFORMANCE_REGRESSION,
         }[self.predicate.kind]
         if self.failure_code is not expected:
             raise ValueError("reduction failure code and predicate kind differ")

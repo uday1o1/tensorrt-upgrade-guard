@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import stat
 import tarfile
+import tempfile
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -145,6 +147,30 @@ def verify_bundle(
     )
 
 
+def materialize_verified_bundle(source: Path, destination: Path) -> VerifiedBundle:
+    """Copy a verified bundle into a new directory without archive extraction APIs."""
+
+    if destination.exists() or destination.is_symlink():
+        raise InvalidInputError("refusing to overwrite replay materialization")
+    verified = verify_bundle(source)
+    entries = tuple(_entries(source))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
+    try:
+        for entry in entries:
+            target = staging / entry.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(_read_entry(entry))
+        staging.replace(destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    materialized = verify_bundle(destination)
+    if materialized.manifest.manifest_sha256 != verified.manifest.manifest_sha256:
+        raise InvalidInputError("materialized bundle identity differs from its source")
+    return materialized
+
+
 def _entries(source: Path) -> Iterator[BundleEntry]:
     if source.is_symlink():
         raise InvalidInputError("bundle source cannot be a symlink")
@@ -227,7 +253,7 @@ def _validate_member_path(value: str) -> None:
 
 
 def _validate_suffix(value: str) -> None:
-    if value == "bundle.json":
+    if value in {"bundle.json", "SHA256SUMS"}:
         return
     if Path(value).suffix.lower() not in ALLOWED_SUFFIXES:
         raise InvalidInputError(f"unsupported bundle file type: {value}")

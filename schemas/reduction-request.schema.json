@@ -68,6 +68,55 @@
       "title": "NumericalPredicate",
       "type": "object"
     },
+    "PerformancePredicate": {
+      "additionalProperties": false,
+      "description": "Paired timing evidence and locked repeated-confidence policy.",
+      "properties": {
+        "allowance": {
+          "minimum": 0,
+          "title": "Allowance",
+          "type": "number"
+        },
+        "baseline_path": {
+          "title": "Baseline Path",
+          "type": "string"
+        },
+        "bootstrap_replicates": {
+          "minimum": 1000,
+          "title": "Bootstrap Replicates",
+          "type": "integer"
+        },
+        "bootstrap_seed": {
+          "title": "Bootstrap Seed",
+          "type": "integer"
+        },
+        "candidate_path": {
+          "title": "Candidate Path",
+          "type": "string"
+        },
+        "kind": {
+          "const": "performance",
+          "title": "Kind",
+          "type": "string"
+        },
+        "minimum_pairs": {
+          "minimum": 20,
+          "title": "Minimum Pairs",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "baseline_path",
+        "candidate_path",
+        "allowance",
+        "bootstrap_seed",
+        "bootstrap_replicates",
+        "minimum_pairs"
+      ],
+      "title": "PerformancePredicate",
+      "type": "object"
+    },
     "ProfilePredicate": {
       "additionalProperties": false,
       "description": "Concrete shape outside a locked optimization profile.",
@@ -149,6 +198,7 @@
       "discriminator": {
         "mapping": {
           "numerical": "#/$defs/NumericalPredicate",
+          "performance": "#/$defs/PerformancePredicate",
           "profile": "#/$defs/ProfilePredicate"
         },
         "propertyName": "kind"
@@ -159,6 +209,9 @@
         },
         {
           "$ref": "#/$defs/ProfilePredicate"
+        },
+        {
+          "$ref": "#/$defs/PerformancePredicate"
         }
       ],
       "title": "Predicate"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tarfile
 import zipfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,8 +15,9 @@ from upgrade_guard.contracts.base import sha256_bytes
 from upgrade_guard.contracts.bundle import BundleManifest, SourceBuildRequest
 from upgrade_guard.contracts.common import ArtifactReference
 from upgrade_guard.errors import InvalidInputError, UnsupportedEnvironmentError
+from upgrade_guard.reproduce.bundle import BundleExport, export_bundle
 from upgrade_guard.reproduce.run import prepare_replay, require_gpu_for_replay
-from upgrade_guard.reproduce.verify import verify_bundle
+from upgrade_guard.reproduce.verify import materialize_verified_bundle, verify_bundle
 
 
 def artifact(path: str, content: bytes, media_type: str = "application/json") -> ArtifactReference:
@@ -230,3 +232,89 @@ def test_unsupported_bundle_type_and_suffix_fail_closed(tmp_path: Path) -> None:
     (root / "forbidden.exe").write_bytes(b"executable")
     with pytest.raises(InvalidInputError, match="unsupported bundle file type"):
         verify_bundle(root)
+
+
+def test_exported_bundle_verifies_and_materializes_into_clean_directory(tmp_path: Path) -> None:
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    source_payloads = {
+        "baseline.json": b'{"id":"baseline"}\n',
+        "candidate.json": b'{"id":"candidate"}\n',
+        "qualification.yaml": b"kind: Qualification\n",
+        "model.onnx": b"frozen-model",
+        "input.npy": b"frozen-input",
+        "plugin.cu": b"__global__ void plugin() {}\n",
+    }
+    for name, content in source_payloads.items():
+        (sources / name).write_bytes(content)
+    request = BundleExport(
+        id="exported-001",
+        created_at=datetime(2026, 8, 13, tzinfo=UTC),
+        baseline_environment=sources / "baseline.json",
+        candidate_environment=sources / "candidate.json",
+        qualification=sources / "qualification.yaml",
+        model=sources / "model.onnx",
+        inputs=(sources / "input.npy",),
+        expected_failure=failure_record(),
+        extra_files={},
+        source_files={"plugin-source/plugin.cu": sources / "plugin.cu"},
+        worker_image_manifest_digest=digest("8"),
+        selected_gpu_uuid="GPU-11111111-1111-1111-1111-111111111111",
+        source_build_command=("cmake", "--build", "build"),
+    )
+    bundle = tmp_path / "bundle"
+    manifest = export_bundle(request, bundle)
+    verified = verify_bundle(bundle)
+    assert verified.manifest == manifest
+    assert verified.source_code_present
+    assert "SHA256SUMS" in verified.observed_files
+
+    fresh = tmp_path / "empty" / "materialized"
+    copied = materialize_verified_bundle(bundle, fresh)
+    assert copied.manifest.manifest_sha256 == manifest.manifest_sha256
+    assert not (fresh / "replay").exists()
+    with pytest.raises(UnsupportedEnvironmentError, match="trust-source-code"):
+        prepare_replay(
+            fresh,
+            trust_source_code=False,
+            trust_included_engine=False,
+        )
+
+
+def test_export_rejects_source_metadata_without_sources(tmp_path: Path) -> None:
+    source = tmp_path / "file.json"
+    source.write_text("{}", encoding="utf-8")
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"model")
+    input_path = tmp_path / "input.npy"
+    input_path.write_bytes(b"input")
+    qualification = tmp_path / "qualification.yaml"
+    qualification.write_text("kind: Qualification\n", encoding="utf-8")
+    request = BundleExport(
+        id="invalid",
+        created_at=datetime(2026, 8, 13, tzinfo=UTC),
+        baseline_environment=source,
+        candidate_environment=source,
+        qualification=qualification,
+        model=model,
+        inputs=(input_path,),
+        expected_failure=failure_record(),
+        extra_files={},
+        source_files={},
+        worker_image_manifest_digest=digest("8"),
+    )
+    with pytest.raises(InvalidInputError, match="metadata requires source"):
+        export_bundle(request, tmp_path / "invalid-bundle")
+
+    valid = replace(request, worker_image_manifest_digest=None, included_engine=model)
+    destination = tmp_path / "valid-bundle"
+    manifest = export_bundle(valid, destination)
+    assert manifest.source_build is None
+    assert manifest.included_engine is not None
+    assert "contains no source" in (destination / "README.md").read_text(encoding="utf-8")
+    with pytest.raises(InvalidInputError, match="overwrite"):
+        export_bundle(valid, destination)
+
+    duplicate = replace(valid, extra_files={"README.md": source})
+    with pytest.raises(InvalidInputError, match="duplicate"):
+        export_bundle(duplicate, tmp_path / "duplicate-bundle")

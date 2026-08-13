@@ -14,7 +14,12 @@ from pydantic import ValidationError
 from upgrade_guard.contracts.base import sha256_file
 from upgrade_guard.errors import InvalidInputError
 from upgrade_guard.reduce.inputs import reduce_numerical_failure
-from upgrade_guard.reduce.predicate import NumericalPredicate, ReductionRequest
+from upgrade_guard.reduce.performance import reduce_performance_failure
+from upgrade_guard.reduce.predicate import (
+    NumericalPredicate,
+    PerformancePredicate,
+    ReductionRequest,
+)
 from upgrade_guard.reduce.shapes import reduce_profile_failure
 
 
@@ -33,6 +38,8 @@ def reduce_failure_directory(source: Path, destination: Path) -> dict[str, Any]:
     try:
         if isinstance(request.predicate, NumericalPredicate):
             summary = _reduce_numerical(source, staging, request)
+        elif isinstance(request.predicate, PerformancePredicate):
+            summary = _reduce_performance(source, request)
         else:
             reduced = reduce_profile_failure(request.predicate)
             summary = {
@@ -93,10 +100,58 @@ def _reduce_numerical(source: Path, staging: Path, request: ReductionRequest) ->
     }
 
 
-def _safe_source_path(root: Path, relative: str) -> Path:
+def _reduce_performance(source: Path, request: ReductionRequest) -> dict[str, Any]:
+    predicate = request.predicate
+    if not isinstance(predicate, PerformancePredicate):
+        raise AssertionError("performance reducer received a different predicate")
+    baseline = _timings(_safe_source_path(source, predicate.baseline_path, suffix=".json"))
+    candidate = _timings(_safe_source_path(source, predicate.candidate_path, suffix=".json"))
+    if len(baseline) != len(candidate):
+        raise InvalidInputError("paired performance evidence has different lengths")
+    from upgrade_guard.compare.performance import AcceptedPair
+
+    reduced = reduce_performance_failure(
+        tuple(
+            AcceptedPair(first, second) for first, second in zip(baseline, candidate, strict=True)
+        ),
+        allowance=predicate.allowance,
+        seed=predicate.bootstrap_seed,
+        replicates=predicate.bootstrap_replicates,
+        minimum_pairs=predicate.minimum_pairs,
+        maximum_candidates=request.maximum_trials,
+        maximum_seconds=float(request.maximum_seconds),
+    )
+    return {
+        "kind": "performance",
+        "failure_code": request.failure_code.value,
+        "signature_sha256": request.signature_sha256,
+        "confirmation_count": request.confirmation_count,
+        "original_pairs": reduced.original_pairs,
+        "reduced_pairs": len(reduced.pairs),
+        "evaluated_candidates": reduced.evaluated_candidates,
+        "budget_exhausted": reduced.budget_exhausted,
+        "point": reduced.estimate.point,
+        "one_sided_lower": reduced.estimate.one_sided_lower,
+        "one_sided_upper": reduced.estimate.one_sided_upper,
+        "outcome": reduced.estimate.outcome.value,
+    }
+
+
+def _timings(path: Path) -> tuple[float, ...]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        timings = tuple(float(item) for item in value)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        raise InvalidInputError("performance evidence must be a JSON timing array") from error
+    if not timings:
+        raise InvalidInputError("performance timing array cannot be empty")
+    return timings
+
+
+def _safe_source_path(root: Path, relative: str, *, suffix: str = ".npy") -> Path:
     path = Path(relative)
-    if path.is_absolute() or ".." in path.parts or path.suffix != ".npy":
-        raise InvalidInputError("reduction array path must be a relative NPY file")
+    if path.is_absolute() or ".." in path.parts or path.suffix != suffix:
+        raise InvalidInputError(f"reduction evidence path must be a relative {suffix} file")
     resolved = (root / path).resolve(strict=True)
     if not resolved.is_relative_to(root.resolve()):
         raise InvalidInputError("reduction array escaped the failure directory")
