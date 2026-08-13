@@ -1,0 +1,18 @@
+{
+  "api_version": "upgradeguard.dev/model-lock/v1",
+  "generator": "tiny-transformer-v1",
+  "generator_seed": 20260813,
+  "numpy": "2.5.2",
+  "onnx": "1.22.0",
+  "opset": 17,
+  "artifacts": {
+    "fp32": {
+      "sha256": "sha256:16dd39f7df92632a0d9268b0b669ee8e110d0bce6b2da189fd046e3b4d2e71b4",
+      "bytes": 12658106
+    },
+    "fp16": {
+      "sha256": "sha256:46687e2f106b1439655e641944a2bb251f40cc7ae673814fa81a383b8f5ec2d5",
+      "bytes": 6340002
+    }
+  }
+}

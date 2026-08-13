@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tensorrt-upgrade-guard"
+version = "0.1.0"
+description = "Host-controlled qualification for TensorRT stack upgrades"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Uday Arora" }]
+dependencies = [
+  "numpy==2.5.2",
+  "onnx==1.22.0",
+  "onnxruntime==1.28.0",
+  "pydantic==2.11.7",
+  "PyYAML==6.0.2",
+  "typer==0.16.0",
+]
+
+[project.scripts]
+upgrade-guard = "upgrade_guard.cli:app"
+
+[dependency-groups]
+dev = [
+  "mypy==1.17.1",
+  "pytest==8.4.1",
+  "pytest-cov==6.2.1",
+  "ruff==0.12.8",
+  "types-PyYAML==6.0.12.20250516",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/upgrade_guard"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["upgrade_guard"]
+omit = [
+  "src/upgrade_guard/worker/build_engine.py",
+  "src/upgrade_guard/worker/run_correctness.py",
+]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "DTZ", "PTH", "RUF", "S"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["upgrade_guard"]

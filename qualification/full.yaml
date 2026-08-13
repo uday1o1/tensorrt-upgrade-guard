@@ -1,0 +1,110 @@
+api_version: upgradeguard.dev/v1alpha1
+kind: Qualification
+baseline_environment_id: baseline
+candidate_environment_id: candidate
+environment_lock: ../.upgrade-guard/matrix.lock.json
+corpus_lock_id: v1-core
+required_cases:
+  - tiny-transformer
+precision_modes:
+  - fp32
+  - explicit_fp16
+optimization_profiles:
+  - id: transformer-dynamic
+    inputs:
+      tokens:
+        minimum: [1, 8, 256]
+        optimum: [4, 128, 256]
+        maximum: [8, 512, 256]
+      mask:
+        minimum: [1, 1, 1, 8]
+        optimum: [4, 1, 1, 128]
+        maximum: [8, 1, 1, 512]
+concrete_shapes:
+  - id: b1_s8
+    inputs: {tokens: [1, 8, 256], mask: [1, 1, 1, 8]}
+  - id: b1_s127
+    inputs: {tokens: [1, 127, 256], mask: [1, 1, 1, 127]}
+  - id: b1_s128
+    inputs: {tokens: [1, 128, 256], mask: [1, 1, 1, 128]}
+  - id: b1_s129
+    inputs: {tokens: [1, 129, 256], mask: [1, 1, 1, 129]}
+  - id: b4_s64
+    inputs: {tokens: [4, 64, 256], mask: [4, 1, 1, 64]}
+  - id: b4_s128
+    inputs: {tokens: [4, 128, 256], mask: [4, 1, 1, 128]}
+  - id: b8_s256
+    inputs: {tokens: [8, 256, 256], mask: [8, 1, 1, 256]}
+  - id: b8_s512
+    inputs: {tokens: [8, 512, 256], mask: [8, 1, 1, 512]}
+input_fixture_ids:
+  - deterministic-numeric
+builder:
+  strongly_typed: true
+  timing_cache: environment_local
+  workspace_limit_bytes: 4294967296
+  optimization_level: 3
+  extra_options: []
+numerical:
+  baseline_to_reference: {atol: 0.00001, rtol: 0.0001}
+  candidate_to_reference: {atol: 0.00001, rtol: 0.0001}
+  candidate_to_baseline: {atol: 0.00001, rtol: 0.0001}
+  relative_error_guard: 0.000000000001
+  require_top1_agreement: false
+  require_top5_agreement: false
+determinism:
+  repetitions: 20
+  require_bitwise: false
+  tolerance: {atol: 0.00001, rtol: 0.0001}
+performance:
+  warmup_milliseconds: 500
+  measurement_milliseconds: 1000
+  minimum_accepted_pairs: 20
+  bootstrap_replicates: 5000
+  bootstrap_seed: 20260813
+  practical_allowance: 0.05
+  shape_allowances:
+    b1_s8: 0.05
+    b1_s127: 0.05
+    b1_s128: 0.05
+    b1_s129: 0.05
+    b4_s64: 0.05
+    b4_s128: 0.05
+    b8_s256: 0.05
+    b8_s512: 0.05
+  shape_weights:
+    b1_s8: 0.10
+    b1_s127: 0.10
+    b1_s128: 0.20
+    b1_s129: 0.10
+    b4_s64: 0.10
+    b4_s128: 0.15
+    b8_s256: 0.15
+    b8_s512: 0.10
+  workload_provenance: Project-owned illustrative request distribution locked before candidate evaluation.
+  one_inference_stream: true
+  cuda_graph: false
+memory:
+  engine_bytes_absolute: 1048576
+  engine_bytes_relative: 0.05
+  device_memory_absolute: 8388608
+  device_memory_relative: 0.05
+  confirmation_builds: 3
+hardware_validity:
+  selected_gpu_uuid: GPU-00000000-0000-0000-0000-000000000000
+  maximum_temperature_celsius: 85
+  maximum_clock_variation_ratio: 0.10
+  maximum_power_variation_ratio: 0.10
+  maximum_gpu_utilization_before_block: 5
+  reject_competing_compute_processes: true
+  require_stable_power_limit: true
+required_confirmations: 2
+reduction_budget:
+  maximum_trials: 100
+  maximum_seconds: 1800
+  confirmation_count: 2
+retention:
+  retain_raw_timings: true
+  retain_engines: false
+  retain_timing_caches: false
+  retain_diagnostic_reports: true

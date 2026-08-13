@@ -1,0 +1,12 @@
+api_version: upgradeguard.dev/v1alpha1
+kind: EnvironmentMatrix
+gpu_uuid: GPU-00000000-0000-0000-0000-000000000000
+environments:
+  - id: baseline
+    base_image: nvcr.io/nvidia/tensorrt:26.06-py3@sha256:2a5a0a9a32ec5ddc1c384c15ddcf3b89ddc4f8647e7ee7ae708d844210183a1e
+    worker_image: 127.0.0.1:5500/upgrade-guard/worker:baseline
+    platform: linux/amd64
+  - id: candidate
+    base_image: nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a
+    worker_image: 127.0.0.1:5500/upgrade-guard/worker:candidate
+    platform: linux/amd64

@@ -1,0 +1,16 @@
+{
+  "policy_version": "2026-08-13.1",
+  "checked_at": "2026-08-13T00:00:00Z",
+  "minimum_compute_capability": "7.5",
+  "minimum_vram_mib": 8192,
+  "minimum_cmake": "3.26",
+  "minimum_driver_by_cuda_major": {
+    "12": "535.0",
+    "13": "580.0"
+  },
+  "source_urls": [
+    "https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/prerequisites.html",
+    "https://docs.nvidia.com/deeplearning/tensorrt/latest/getting-started/support-matrix.html",
+    "https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-container.html"
+  ]
+}

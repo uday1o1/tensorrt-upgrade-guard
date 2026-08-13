@@ -1,0 +1,43 @@
+api_version: upgradeguard.dev/v1alpha1
+kind: CorpusRecipe
+id: v1-core
+generator_version: tiny-transformer-v1
+precisions:
+  - fp32
+  - fp16
+expected_model_sha256:
+  fp32: sha256:16dd39f7df92632a0d9268b0b669ee8e110d0bce6b2da189fd046e3b4d2e71b4
+  fp16: sha256:46687e2f106b1439655e641944a2bb251f40cc7ae673814fa81a383b8f5ec2d5
+transformer_shapes:
+  - id: b1_s8
+    batch: 1
+    sequence: 8
+    weight: 0.10
+  - id: b1_s127
+    batch: 1
+    sequence: 127
+    weight: 0.10
+  - id: b1_s128
+    batch: 1
+    sequence: 128
+    weight: 0.20
+  - id: b1_s129
+    batch: 1
+    sequence: 129
+    weight: 0.10
+  - id: b4_s64
+    batch: 4
+    sequence: 64
+    weight: 0.10
+  - id: b4_s128
+    batch: 4
+    sequence: 128
+    weight: 0.15
+  - id: b8_s256
+    batch: 8
+    sequence: 256
+    weight: 0.15
+  - id: b8_s512
+    batch: 8
+    sequence: 512
+    weight: 0.10

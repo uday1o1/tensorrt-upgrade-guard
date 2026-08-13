@@ -1,0 +1,33 @@
+api_version: upgradeguard.dev/attribution/v1
+models:
+  tiny-transformer:
+    owner: Uday Arora
+    license: Apache-2.0
+    source: models/generators/tiny_transformer.py
+    redistribution: allowed
+  mobilenetv3-small-075:
+    owner: ONNX Project contributors
+    source_repository: https://github.com/onnx/models
+    source_revision: 4f43949841cb55a0b98dc8fcd045431ccafd9f96
+    object_sha256: ef7b5191b3e2586c409ddcfbfef42a6434a9ac885608b8d16e9c767c518f1c31
+    license: Apache-2.0
+    license_url: https://github.com/onnx/models/blob/main/LICENSE
+    redistribution: review-before-publication
+inputs:
+  deterministic-numeric:
+    owner: Uday Arora
+    generator: upgrade_guard.corpus.reference:deterministic_transformer_inputs
+    license: Apache-2.0
+    redistribution: allowed
+  project-gradient:
+    owner: Uday Arora
+    path: models/assets/gradient.ppm
+    sha256: 4dd63cb1a6810501580d1e3a1f1e559d3b253d66298e67d7d53eee7b9466e8fb
+    license: Apache-2.0
+    redistribution: allowed
+  project-checkerboard:
+    owner: Uday Arora
+    path: models/assets/checkerboard.ppm
+    sha256: 7025a995b94ea8a2f7b9bd3a181965751eac157ac663edb1b18aae9cb44144aa
+    license: Apache-2.0
+    redistribution: allowed

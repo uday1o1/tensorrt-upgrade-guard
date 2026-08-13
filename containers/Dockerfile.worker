@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG BASE_MANIFEST_DIGEST
+LABEL com.udayarora.upgradeguard.base.manifest.digest="${BASE_MANIFEST_DIGEST}"
+
+ARG CUDA_PYTHON_VERSION=13.3.1
+ARG ONNX_VERSION=1.22.0
+ARG ONNXRUNTIME_VERSION=1.28.0
+
+RUN python3 -m pip install --no-cache-dir \
+      "cuda-python==${CUDA_PYTHON_VERSION}" \
+      "onnx==${ONNX_VERSION}" \
+      "onnxruntime==${ONNXRUNTIME_VERSION}" \
+    && python3 -m pip check
+
+# UpgradeGuard source is mounted read-only and hashed for each run.
+# The worker image freezes NVIDIA and CPU reference dependencies without embedding mutable project code.

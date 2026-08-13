@@ -1,0 +1,22 @@
+{
+  "commands": [
+    "compare",
+    "corpus materialize",
+    "doctor",
+    "matrix lock",
+    "qualify",
+    "reduce",
+    "report",
+    "reproduce run",
+    "reproduce verify"
+  ],
+  "exit_codes": {
+    "gate_failed": 1,
+    "invalid_input": 2,
+    "unsupported": 3,
+    "infrastructure_or_inconclusive": 4,
+    "internal": 5,
+    "passed": 0
+  },
+  "schema_version": "upgradeguard.dev/cli-contract/v1"
+}

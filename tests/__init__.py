@@ -1,0 +1,1 @@
+"""UpgradeGuard test suite."""

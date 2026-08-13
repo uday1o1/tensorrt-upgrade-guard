@@ -1,0 +1,23 @@
+{
+  "api_version": "upgradeguard.dev/model-lock/v1",
+  "model_id": "residual-rmsnorm-plugin-micrograph",
+  "generator": "upgrade_guard.corpus.generators:generate_plugin_micrograph",
+  "onnx": "1.22.0",
+  "opset": 17,
+  "artifacts": {
+    "fp32": {
+      "sha256": "sha256:5330985614e584644c71a775829d1e36fd836025bb0a48fb3e6c14f9f0bbe378",
+      "bytes": 383
+    },
+    "fp16": {
+      "sha256": "sha256:e602f3288c96c111a29bc072554d8d419f38f35a846096e6dbb61ee638dbc406",
+      "bytes": 383
+    }
+  },
+  "plugin": {
+    "name": "ResidualRMSNorm",
+    "version": "1",
+    "namespace": "com.udayarora.upgradeguard",
+    "epsilon": 0.00001
+  }
+}
