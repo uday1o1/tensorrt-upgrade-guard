@@ -11,6 +11,7 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 from upgrade_guard.contracts.base import sha256_file
+from upgrade_guard.errors import InvalidInputError
 
 HIDDEN = 256
 HEADS = 8
@@ -278,8 +279,12 @@ def generate_plugin_micrograph(
     destination: Path,
     *,
     precision: Literal["fp32", "fp16"] = "fp32",
+    extra_workspace_bytes: int = 0,
 ) -> GeneratedModel:
     """Generate the dynamic ONNX graph containing the project custom operator."""
+
+    if extra_workspace_bytes < 0:
+        raise InvalidInputError("plugin workspace seed cannot be negative")
 
     tensor_type = TensorProto.FLOAT if precision == "fp32" else TensorProto.FLOAT16
     inputs = [
@@ -296,6 +301,8 @@ def generate_plugin_micrograph(
         domain="com.udayarora.upgradeguard",
         epsilon=1e-5,
     )
+    if extra_workspace_bytes:
+        node.attribute.append(helper.make_attribute("extra_workspace_bytes", extra_workspace_bytes))
     graph = helper.make_graph([node], "upgradeguard_plugin_micrograph", inputs, [output])
     model = helper.make_model(
         graph,

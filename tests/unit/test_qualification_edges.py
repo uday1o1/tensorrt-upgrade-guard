@@ -7,13 +7,17 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from tests.factories import digest
 from upgrade_guard.compare.performance import GateOutcome
 from upgrade_guard.containers.commands import CommandResult
 from upgrade_guard.contracts.base import sha256_file
+from upgrade_guard.contracts.common import PrecisionMode
+from upgrade_guard.contracts.qualification import QualificationSpec, ShapeRange
 from upgrade_guard.errors import FailureCode, InfrastructureError, InvalidInputError
 from upgrade_guard.qualification import (
+    _block_variation_reasons,
     _jsonable,
     _observe_validity,
     _optional_float,
@@ -46,9 +50,7 @@ class ObservationRunner:
         return self.gpu_result
 
 
-def _specification() -> object:
-    from upgrade_guard.contracts.qualification import QualificationSpec
-
+def _specification() -> QualificationSpec:
     return QualificationSpec.model_validate(
         {
             "api_version": "upgradeguard.dev/v1alpha1",
@@ -115,6 +117,53 @@ def _specification() -> object:
             "retention": {},
         }
     )
+
+
+def test_precision_specific_numerical_policy_is_bounded() -> None:
+    specification = _specification()
+    assert specification.numerical_policy(PrecisionMode.FP32) == specification.numerical
+
+    payload = specification.model_dump(mode="json")
+    fp16_policy = {
+        "baseline_to_reference": {"atol": 0.005, "rtol": 0.005},
+        "candidate_to_reference": {"atol": 0.005, "rtol": 0.005},
+        "candidate_to_baseline": {"atol": 0.005, "rtol": 0.005},
+    }
+    payload["precision_numerical"] = {"explicit_fp16": fp16_policy}
+    accepted = QualificationSpec.model_validate(payload)
+    assert (
+        accepted.numerical_policy(PrecisionMode.EXPLICIT_FP16).baseline_to_reference.atol == 0.005
+    )
+
+    fp16_policy["candidate_to_reference"]["atol"] = 0.02
+    with pytest.raises(ValidationError, match="fp16 numerical policy exceeds"):
+        QualificationSpec.model_validate(payload)
+
+    payload["precision_numerical"] = {
+        "fp32": {
+            "baseline_to_reference": {"atol": 0, "rtol": 0},
+            "candidate_to_reference": {"atol": 0, "rtol": 0.002},
+            "candidate_to_baseline": {"atol": 0, "rtol": 0},
+        }
+    }
+    with pytest.raises(ValidationError, match="fp32 numerical policy exceeds"):
+        QualificationSpec.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"minimum": [1], "optimum": [1, 2], "maximum": [2]}, "identical rank"),
+        ({"minimum": [], "optimum": [], "maximum": []}, "rank cannot be zero"),
+        (
+            {"minimum": [0], "optimum": [1], "maximum": [2]},
+            "0 < min <= opt <= max",
+        ),
+    ],
+)
+def test_shape_range_rejects_invalid_profiles(payload: dict[str, object], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ShapeRange.model_validate(payload)
 
 
 def test_stored_summary_and_machine_json_fail_closed(tmp_path: Path) -> None:
@@ -208,3 +257,14 @@ def test_status_json_and_path_translation_helpers(tmp_path: Path) -> None:
             "unchanged",
         ]
     }
+    specification = _specification()
+    reasons = _block_variation_reasons(
+        {"graphics_clock_mhz": 2000, "power_watts": 100, "power_limit_watts": 300},
+        {"graphics_clock_mhz": 1500, "power_watts": 130, "power_limit_watts": 250},
+        specification,
+    )
+    assert reasons == (
+        "graphics_clock_variation_exceeded",
+        "power_variation_exceeded",
+        "power_limit_changed",
+    )

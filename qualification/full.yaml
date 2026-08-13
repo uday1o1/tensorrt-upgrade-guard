@@ -52,6 +52,14 @@ numerical:
   relative_error_guard: 0.000000000001
   require_top1_agreement: false
   require_top5_agreement: false
+precision_numerical:
+  explicit_fp16:
+    baseline_to_reference: {atol: 0.005, rtol: 0.005}
+    candidate_to_reference: {atol: 0.005, rtol: 0.005}
+    candidate_to_baseline: {atol: 0.005, rtol: 0.005}
+    relative_error_guard: 0.000000000001
+    require_top1_agreement: false
+    require_top5_agreement: false
 determinism:
   repetitions: 20
   require_bitwise: false

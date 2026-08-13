@@ -30,6 +30,7 @@ TRTEXEC_OPTIONS = (
     "--warmUp",
     "--duration",
     "--noDataTransfers",
+    "--infStreams",
 )
 
 
@@ -48,7 +49,7 @@ class SimulatedWorkerRunner:
         command = tuple(args)
         if command[0] == "nvidia-smi":
             if any(item.startswith("--query-gpu=") for item in command):
-                stdout = f"{GPU_UUID}, 40, 2100, 9000, 100, 0\n"
+                stdout = f"{GPU_UUID}, 40, 2100, 9000, 100, 300, 0\n"
             else:
                 stdout = ""
             return CommandResult(command, 0, stdout, "", 0.01)

@@ -71,6 +71,14 @@ def test_plugin_graph_and_reference_cover_tails_and_validation(tmp_path: Path) -
         residual_rmsnorm_reference(x, residual, gamma, epsilon=0)
     with pytest.raises(InvalidInputError, match="gamma"):
         residual_rmsnorm_reference(x, residual, gamma.astype(np.float16), epsilon=1e-5)
+    seeded = generate_plugin_micrograph(
+        tmp_path / "workspace.onnx", extra_workspace_bytes=64 * 1024 * 1024
+    )
+    seeded_model = onnx.load(seeded.path)
+    attributes = {attribute.name: attribute.i for attribute in seeded_model.graph.node[0].attribute}
+    assert attributes["extra_workspace_bytes"] == 64 * 1024 * 1024
+    with pytest.raises(InvalidInputError, match="workspace"):
+        generate_plugin_micrograph(tmp_path / "invalid.onnx", extra_workspace_bytes=-1)
 
 
 def test_smoke_recipe_materializes_atomically_and_rejects_mutation(tmp_path: Path) -> None:

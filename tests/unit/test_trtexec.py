@@ -17,6 +17,7 @@ OPTIONS = (
     "--warmUp",
     "--duration",
     "--noDataTransfers",
+    "--infStreams",
 )
 
 
@@ -30,13 +31,35 @@ def test_benchmark_command_declares_every_primary_policy() -> None:
         warmup_milliseconds=200,
         measurement_milliseconds=1000,
     )
-    assert "--streams=1" in command
+    assert "--infStreams=1" in command
     assert "--noDataTransfers" in command
     assert not any("useCudaGraph" in item for item in command)
     with pytest.raises(UnsupportedEnvironmentError, match="lacks required"):
         benchmark_command(
             trtexec_path="trtexec",
             supported_options=(),
+            engine="engine.plan",
+            shapes={"x": (1,)},
+            export_times="times.json",
+            warmup_milliseconds=1,
+            measurement_milliseconds=1,
+        )
+    legacy = benchmark_command(
+        trtexec_path="trtexec",
+        supported_options=tuple(
+            "--streams" if option == "--infStreams" else option for option in OPTIONS
+        ),
+        engine="engine.plan",
+        shapes={"x": (1,)},
+        export_times="times.json",
+        warmup_milliseconds=1,
+        measurement_milliseconds=1,
+    )
+    assert "--streams=1" in legacy
+    with pytest.raises(UnsupportedEnvironmentError, match="one-stream"):
+        benchmark_command(
+            trtexec_path="trtexec",
+            supported_options=tuple(option for option in OPTIONS if option != "--infStreams"),
             engine="engine.plan",
             shapes={"x": (1,)},
             export_times="times.json",

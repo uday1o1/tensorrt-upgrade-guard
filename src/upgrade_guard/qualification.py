@@ -27,6 +27,7 @@ from upgrade_guard.compare.validity import ValidityObservation, rejection_reason
 from upgrade_guard.containers.commands import CommandRunner, Runner, command_sha256
 from upgrade_guard.containers.runtime import DockerGpuWorker, WorkerMounts
 from upgrade_guard.contracts.base import sha256_file
+from upgrade_guard.contracts.common import PrecisionMode
 from upgrade_guard.contracts.environment import EnvironmentLock, MatrixLock
 from upgrade_guard.contracts.qualification import ConcreteShape, QualificationSpec
 from upgrade_guard.corpus.reference import run_onnx_reference
@@ -150,6 +151,7 @@ class QualificationRunner:
                     corpus_root,
                     staging,
                     suffix,
+                    precision,
                     shape_id,
                     runs[specification.baseline_environment_id][shape_id],
                     runs[specification.candidate_environment_id][shape_id],
@@ -408,6 +410,10 @@ class QualificationRunner:
                         matrix.gpu_uuid,
                         specification,
                     )
+                    after_reasons = (
+                        *after_reasons,
+                        *_block_variation_reasons(before, after, specification),
+                    )
                     medians[environment_id] = timing.median_milliseconds
                     pair_records.append(
                         {
@@ -486,6 +492,7 @@ def _compare_correctness_case(
     corpus_root: Path,
     output_root: Path,
     precision: str,
+    precision_mode: PrecisionMode,
     shape_id: str,
     baseline: dict[str, Any],
     candidate: dict[str, Any],
@@ -513,14 +520,15 @@ def _compare_correctness_case(
         tuple(candidate["input_sha256"].values()),
         specification.determinism.tolerance,
     )
+    numerical_policy = specification.numerical_policy(precision_mode)
     decision = decide_three_way(
         "output",
         reference[0].values,
         baseline_values[0],
         candidate_values[0],
-        baseline_policy=specification.numerical.baseline_to_reference,
-        candidate_policy=specification.numerical.candidate_to_reference,
-        drift_policy=specification.numerical.candidate_to_baseline,
+        baseline_policy=numerical_policy.baseline_to_reference,
+        candidate_policy=numerical_policy.candidate_to_reference,
+        drift_policy=numerical_policy.candidate_to_baseline,
     )
     failure = decision.failure_code
     if failure is None and (
@@ -678,7 +686,7 @@ def _observe_validity(
         (
             "nvidia-smi",
             f"--id={gpu_uuid}",
-            "--query-gpu=uuid,temperature.gpu,clocks.current.graphics,clocks.current.memory,power.draw,utilization.gpu",
+            "--query-gpu=uuid,temperature.gpu,clocks.current.graphics,clocks.current.memory,power.draw,power.limit,utilization.gpu",
             "--format=csv,noheader,nounits",
         ),
         timeout_seconds=15,
@@ -686,7 +694,7 @@ def _observe_validity(
     if query.returncode != 0:
         return ({"query_error": query.stderr.strip()}, ("gpu_observation_failed",))
     fields = [field.strip() for field in query.stdout.strip().split(",")]
-    if len(fields) != 6:
+    if len(fields) != 7:
         return ({"raw": query.stdout.strip()}, ("gpu_observation_malformed",))
     process_query = runner.run(
         (
@@ -705,13 +713,15 @@ def _observe_validity(
     graphics_clock = _optional_int(fields[2])
     memory_clock = _optional_int(fields[3])
     power = _optional_float(fields[4])
-    utilization = _optional_float(fields[5])
+    power_limit = _optional_float(fields[5])
+    utilization = _optional_float(fields[6])
     observed: dict[str, Any] = {
         "gpu_uuid": fields[0],
         "temperature_celsius": temperature,
         "graphics_clock_mhz": graphics_clock,
         "memory_clock_mhz": memory_clock,
         "power_watts": power,
+        "power_limit_watts": power_limit,
         "utilization_percent": utilization,
         "competing_compute_processes": processes,
     }
@@ -730,7 +740,42 @@ def _observe_validity(
         graphics_clock_mhz=graphics_clock,
         minimum_graphics_clock_mhz=None,
     )
-    return observed, rejection_reasons(observation)
+    reasons = list(rejection_reasons(observation))
+    if process_query.returncode != 0:
+        reasons.append("process_observation_failed")
+    return observed, tuple(reasons)
+
+
+def _block_variation_reasons(
+    before: dict[str, Any], after: dict[str, Any], specification: QualificationSpec
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    for field, allowance, label in (
+        (
+            "graphics_clock_mhz",
+            specification.hardware_validity.maximum_clock_variation_ratio,
+            "graphics_clock_variation_exceeded",
+        ),
+        (
+            "power_watts",
+            specification.hardware_validity.maximum_power_variation_ratio,
+            "power_variation_exceeded",
+        ),
+    ):
+        first = before.get(field)
+        second = after.get(field)
+        if not isinstance(first, int | float) or not isinstance(second, int | float) or first <= 0:
+            reasons.append(f"{field}_observation_missing")
+        elif abs(float(second) - float(first)) / float(first) > allowance:
+            reasons.append(label)
+    if specification.hardware_validity.require_stable_power_limit:
+        first_limit = before.get("power_limit_watts")
+        second_limit = after.get("power_limit_watts")
+        if first_limit is None or second_limit is None:
+            reasons.append("power_limit_observation_missing")
+        elif first_limit != second_limit:
+            reasons.append("power_limit_changed")
+    return tuple(reasons)
 
 
 def _optional_float(value: str) -> float | None:

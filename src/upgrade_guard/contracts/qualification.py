@@ -93,6 +93,7 @@ class QualificationSpec(StrictModel):
     input_fixture_ids: tuple[str, ...]
     builder: BuilderPolicy
     numerical: NumericalPolicy
+    precision_numerical: dict[PrecisionMode, NumericalPolicy] = Field(default_factory=dict)
     determinism: DeterminismPolicy
     performance: PerformancePolicy
     memory: MemoryPolicy
@@ -114,4 +115,21 @@ class QualificationSpec(StrictModel):
         ):
             if not values:
                 raise ValueError(f"{name} cannot be empty")
+        policies = {PrecisionMode.FP32: self.numerical, **self.precision_numerical}
+        for precision, policy in policies.items():
+            ceiling_atol, ceiling_rtol = (
+                (1e-4, 1e-3) if precision is PrecisionMode.FP32 else (1e-2, 1e-2)
+            )
+            for tolerance in (
+                policy.baseline_to_reference,
+                policy.candidate_to_reference,
+                policy.candidate_to_baseline,
+            ):
+                if tolerance.atol > ceiling_atol or tolerance.rtol > ceiling_rtol:
+                    raise ValueError(f"{precision.value} numerical policy exceeds the V1 ceiling")
         return self
+
+    def numerical_policy(self, precision: PrecisionMode) -> NumericalPolicy:
+        """Return the frozen precision-specific policy or the FP32 default."""
+
+        return self.precision_numerical.get(precision, self.numerical)

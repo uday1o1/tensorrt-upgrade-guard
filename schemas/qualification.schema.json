@@ -523,6 +523,16 @@
       "title": "Precision Modes",
       "type": "array"
     },
+    "precision_numerical": {
+      "additionalProperties": {
+        "$ref": "#/$defs/NumericalPolicy"
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/PrecisionMode"
+      },
+      "title": "Precision Numerical",
+      "type": "object"
+    },
     "reduction_budget": {
       "$ref": "#/$defs/ReductionBudget"
     },

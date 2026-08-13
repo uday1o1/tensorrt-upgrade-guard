@@ -42,10 +42,22 @@ def benchmark_command(
         "--noDataTransfers",
     }
     missing = sorted(required - set(supported_options))
+    stream_option = (
+        "--infStreams=1"
+        if "--infStreams" in supported_options
+        else "--streams=1"
+        if "--streams" in supported_options
+        else None
+    )
     if missing:
         raise UnsupportedEnvironmentError(
             "locked trtexec lacks required primary benchmark options",
             details={"missing": missing},
+        )
+    if stream_option is None:
+        raise UnsupportedEnvironmentError(
+            "locked trtexec lacks a one-stream option",
+            details={"missing": ["--infStreams or --streams"]},
         )
     shape_value = ",".join(
         f"{name}:{'x'.join(str(item) for item in shape)}" for name, shape in sorted(shapes.items())
@@ -58,7 +70,7 @@ def benchmark_command(
         f"--exportTimes={export_times}",
         f"--warmUp={warmup_milliseconds}",
         f"--duration={duration_seconds}",
-        "--streams=1",
+        stream_option,
         "--noDataTransfers",
     )
 

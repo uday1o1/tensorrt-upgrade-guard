@@ -67,7 +67,11 @@ def build_engine(arguments: argparse.Namespace) -> dict[str, Any]:
     inspector_text = inspector.get_engine_information(trt.LayerInformationFormat.JSON)
     arguments.inspector.parent.mkdir(parents=True, exist_ok=True)
     arguments.inspector.write_text(inspector_text + "\n", encoding="utf-8")
-    device_memory = getattr(engine, "device_memory_size_v2", engine.device_memory_size)
+    device_memory = (
+        engine.device_memory_size_v2
+        if hasattr(engine, "device_memory_size_v2")
+        else engine.device_memory_size
+    )
     ended = time.time()
     return {
         "schema_version": "upgradeguard.dev/worker-build/v1",
