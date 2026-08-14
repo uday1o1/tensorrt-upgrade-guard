@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG BASE_IMAGE
+ARG BASE_IMAGE=nvcr.io/nvidia/tensorrt:26.06-py3@sha256:2a5a0a9a32ec5ddc1c384c15ddcf3b89ddc4f8647e7ee7ae708d844210183a1e
 FROM ${BASE_IMAGE}
 
 ARG BASE_MANIFEST_DIGEST

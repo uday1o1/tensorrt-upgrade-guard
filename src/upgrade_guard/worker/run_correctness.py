@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from upgrade_guard.worker.common import process_memory_evidence, sha256_file, write_json_atomic
+from upgrade_guard.worker.common import (
+    command_evidence,
+    process_memory_evidence,
+    sha256_file,
+    write_json_atomic,
+)
 
 
 def _checked(result: tuple[Any, ...], operation: str) -> tuple[Any, ...]:
@@ -190,16 +196,16 @@ def main() -> None:
     try:
         result = run_engine(arguments)
     except Exception as error:
-        write_json_atomic(
-            arguments.result,
-            {
-                "schema_version": "upgradeguard.dev/worker-correctness/v1",
-                "status": "failed",
-                "error_type": type(error).__name__,
-                "message": str(error),
-            },
-        )
+        failure: dict[str, object] = {
+            "schema_version": "upgradeguard.dev/worker-correctness/v1",
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "message": str(error),
+        }
+        failure.update(command_evidence("upgrade_guard.worker.run_correctness", sys.argv[1:]))
+        write_json_atomic(arguments.result, failure)
         raise
+    result.update(command_evidence("upgrade_guard.worker.run_correctness", sys.argv[1:]))
     write_json_atomic(arguments.result, result)
 
 

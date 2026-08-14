@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from upgrade_guard.worker.common import (
+    command_evidence,
     load_json,
     process_memory_evidence,
     sha256_file,
@@ -185,16 +187,19 @@ def main() -> None:
     try:
         result = build_engine(arguments)
     except Exception as error:
+        failure: dict[str, object] = {
+            "schema_version": "upgradeguard.dev/worker-build/v1",
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "message": str(error),
+        }
+        failure.update(command_evidence("upgrade_guard.worker.build_engine", sys.argv[1:]))
         write_json_atomic(
             arguments.result,
-            {
-                "schema_version": "upgradeguard.dev/worker-build/v1",
-                "status": "failed",
-                "error_type": type(error).__name__,
-                "message": str(error),
-            },
+            failure,
         )
         raise
+    result.update(command_evidence("upgrade_guard.worker.build_engine", sys.argv[1:]))
     write_json_atomic(arguments.result, result)
 
 

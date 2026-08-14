@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -150,9 +151,9 @@ def execute_replay(
     if source.is_dir() and output.resolve().is_relative_to(source.resolve()):
         raise InvalidInputError("replay output must be outside the verified bundle directory")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.mkdir()
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     try:
-        bundle_root = output / "bundle"
+        bundle_root = staging / "bundle"
         verified = materialize_verified_bundle(source, bundle_root)
         manifest = verified.manifest
         source_build = manifest.source_build
@@ -184,8 +185,8 @@ def execute_replay(
                 "first replay step differs from the reviewed source build command"
             )
 
-        work = output / "work"
-        logs = output / "steps"
+        work = staging / "work"
+        logs = staging / "steps"
         work.mkdir()
         logs.mkdir()
         gpu_worker = worker or DockerGpuWorker()
@@ -226,14 +227,14 @@ def execute_replay(
             expected_failure_code=manifest.expected_failure.code.value,
             step_results=tuple(completed),
         )
-        (output / "replay-result.json").write_text(
+        (staging / "replay-result.json").write_text(
             json.dumps(asdict(replay), allow_nan=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        staging.replace(output)
         return replay
     except BaseException:
-        if not any(output.iterdir()):
-            shutil.rmtree(output)
+        shutil.rmtree(staging, ignore_errors=True)
         raise
 
 

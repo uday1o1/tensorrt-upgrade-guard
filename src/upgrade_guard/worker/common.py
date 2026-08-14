@@ -44,6 +44,17 @@ def load_json(path: Path) -> Any:
         return json.load(stream)
 
 
+def command_evidence(module: str, arguments: list[str]) -> dict[str, object]:
+    """Return a stable worker CLI argument array and its canonical SHA-256."""
+
+    command = ("python3", "-m", module, *arguments)
+    canonical = json.dumps(command, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return {
+        "command": list(command),
+        "command_sha256": f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+    }
+
+
 def process_memory_evidence() -> dict[str, Any]:
     """Return separately labeled host peak RSS and coarse GPU process observations."""
 

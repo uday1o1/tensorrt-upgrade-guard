@@ -18,8 +18,9 @@ The Python environment uses `uv.lock` and exact direct dependency versions.
 Model and input locks preserve SHA-256 identities.
 GitHub Actions use immutable 40-character commit SHAs.
 
-The remote runner generates SPDX package inventories for both exact derived workers.
-Publication requires dependency and vulnerability triage against those inventories.
+The remote runner generates SPDX package inventories for both exact derived workers and binds each document to its immutable image identity.
+Publication audits the exact host Python lock and hash-locked Python packages added by the worker Dockerfile.
+Preinstalled NGC Python packages, Debian packages, and proprietary NVIDIA packages remain inventory-only scopes with an explicit limitation rather than a vulnerability-free claim.
 
 ## Credentials
 

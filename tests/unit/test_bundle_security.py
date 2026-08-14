@@ -390,6 +390,23 @@ def test_typed_replay_rebuilds_and_confirms_expected_failure(tmp_path: Path) -> 
     )
     assert "--trust-source-code" in (bundle / "README.md").read_text()
 
+    class FailingWorker:
+        def run(self, **kwargs: object) -> CommandResult:
+            del kwargs
+            raise RuntimeError("interrupted worker")
+
+    failed_output = tmp_path / "failed-replay"
+    with pytest.raises(RuntimeError, match="interrupted"):
+        execute_replay(
+            bundle,
+            failed_output,
+            trust_source_code=True,
+            trust_included_engine=False,
+            worker=FailingWorker(),  # type: ignore[arg-type]
+        )
+    assert not failed_output.exists()
+    assert not list(tmp_path.glob(".failed-replay.*"))
+
     with pytest.raises(InvalidInputError, match="overwrite"):
         execute_replay(
             bundle,

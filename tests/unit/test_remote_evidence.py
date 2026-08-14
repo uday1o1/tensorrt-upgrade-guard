@@ -8,13 +8,17 @@ from pathlib import Path
 import pytest
 
 from scripts.generate_remote_evidence import (
+    BENCHMARK_ORDER_SCHEDULE,
+    _build_manifest_table,
     _inventory,
     _validate_clean_replays,
     _validate_cuda_benchmark,
     _validate_pip_audit,
     _validate_profile_summary,
+    _validate_sanitizer_evidence,
     _validate_spdx,
 )
+from upgrade_guard.containers.commands import command_sha256
 
 
 def test_semantic_publication_inputs_are_validated(tmp_path: Path) -> None:
@@ -55,6 +59,10 @@ def test_inventory_excludes_active_log_and_generated_outputs(tmp_path: Path) -> 
     (state / "logs").mkdir(parents=True)
     retained = state / "retained.json"
     retained.write_text("{}\n", encoding="utf-8")
+    (state / "stale").mkdir()
+    (state / "stale" / "old.bin").write_bytes(b"old")
+    (state / "diagnostics").mkdir()
+    (state / "diagnostics" / "failure.json").write_text("{}\n", encoding="utf-8")
     (state / "logs" / "final-evidence.log").write_text("still changing", encoding="utf-8")
     output = state / "evidence.json"
     output.write_text("stale", encoding="utf-8")
@@ -64,15 +72,12 @@ def test_inventory_excludes_active_log_and_generated_outputs(tmp_path: Path) -> 
     assert set(inventory) == {"retained.json"}
 
 
-def test_cuda_benchmark_requires_twenty_alternating_pairs() -> None:
-    pairs = [
-        {"order": ("scalar_then_optimized" if index % 2 == 0 else "optimized_then_scalar")}
-        for index in range(20)
-    ]
-    _validate_cuda_benchmark({"cases": [{"pairs": pairs}]})
+def test_cuda_benchmark_requires_twenty_seeded_balanced_pairs() -> None:
+    pairs = [{"order": order} for order in BENCHMARK_ORDER_SCHEDULE]
+    _validate_cuda_benchmark({"order_seed": 20260813, "cases": [{"pairs": pairs}]})
     pairs[-1]["order"] = "scalar_then_optimized"
-    with pytest.raises(RuntimeError, match="alternate"):
-        _validate_cuda_benchmark({"cases": [{"pairs": pairs}]})
+    with pytest.raises(RuntimeError, match="balanced"):
+        _validate_cuda_benchmark({"order_seed": 20260813, "cases": [{"pairs": pairs}]})
 
 
 def test_reduction_requires_both_clean_typed_cli_replays() -> None:
@@ -98,3 +103,50 @@ def test_reduction_requires_both_clean_typed_cli_replays() -> None:
     value["clean_replays"].pop("G7")
     with pytest.raises(RuntimeError, match="exactly G2 and G7"):
         _validate_clean_replays(value)
+
+
+def test_sanitizer_controls_and_diagnostic_are_hash_bound(tmp_path: Path) -> None:
+    root = tmp_path / "sanitizers"
+    root.mkdir()
+    diagnostic = root / "sanitizer-tail-oob.log"
+    diagnostic.write_text("Invalid __global__ read\nERROR SUMMARY: 1 error\n", encoding="utf-8")
+    from upgrade_guard.contracts.base import sha256_file
+
+    (root / "sanitizer-seed.json").write_text(
+        json.dumps(
+            {
+                "expected": "SANITIZER_FAILURE",
+                "control": "passed",
+                "observed_exit_code": 86,
+                "diagnostic": "out_of_bounds_global_access",
+                "diagnostic_log_sha256": sha256_file(diagnostic),
+            }
+        ),
+        encoding="utf-8",
+    )
+    for tool in ("memcheck", "racecheck", "initcheck", "synccheck"):
+        (root / f"sanitizer-{tool}-control.log").write_text(
+            "ERROR SUMMARY: 0 errors\n", encoding="utf-8"
+        )
+    _validate_sanitizer_evidence(tmp_path)
+    diagnostic.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="exact diagnostic"):
+        _validate_sanitizer_evidence(tmp_path)
+
+
+def test_build_table_requires_exact_strongly_typed_commands(tmp_path: Path) -> None:
+    path = tmp_path / "core-run" / "baseline" / "fp32" / "build-0.json"
+    path.parent.mkdir(parents=True)
+    value = {
+        "status": "passed",
+        "command": ["python3", "-m", "upgrade_guard.worker.build_engine"],
+        "command_sha256": command_sha256(["python3", "-m", "upgrade_guard.worker.build_engine"]),
+        "strongly_typed": True,
+        "engine": {"sha256": "sha256:" + "2" * 64},
+    }
+    path.write_text(json.dumps(value), encoding="utf-8")
+    assert len(_build_manifest_table(tmp_path)) == 1
+    value["strongly_typed"] = False
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="strong-typed"):
+        _build_manifest_table(tmp_path)

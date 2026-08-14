@@ -4,6 +4,7 @@
 #include <nvtx3/nvToolsExt.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -152,11 +153,15 @@ int main(int argc, char** argv)
         return profileOnly() ? 0 : 1;
     }
     constexpr std::int32_t rows{4096};
+    constexpr std::array<bool, 20> scalarFirstSchedule{true, false, false, true, true,
+        false, true, false, false, true, false, true, true, false, false, true, true, false,
+        true, false};
     std::vector<std::int32_t> const hiddenSizes{256, 259};
     bool measuredBenefit{false};
     bool noRegression{true};
     std::cout << std::fixed << std::setprecision(9) << "{\"schema_version\":"
-              << "\"upgradeguard.dev/cuda-benchmark/v1\",\"profiled\":false,\"cases\":[";
+              << "\"upgradeguard.dev/cuda-benchmark/v1\",\"profiled\":false,"
+              << "\"order_seed\":20260813,\"cases\":[";
     for (std::size_t index = 0; index < hiddenSizes.size(); ++index)
     {
         std::int32_t const hidden = hiddenSizes[index];
@@ -172,7 +177,7 @@ int main(int argc, char** argv)
         {
             float scalar{NAN};
             float optimized{NAN};
-            if (pair % 2 == 0)
+            if (scalarFirstSchedule[static_cast<std::size_t>(pair)])
             {
                 scalar = benchmark(false, buffers, rows, hidden);
                 optimized = benchmark(true, buffers, rows, hidden);
@@ -215,7 +220,8 @@ int main(int argc, char** argv)
                 std::cout << ',';
             }
             std::cout << "{\"order\":\""
-                      << (pair % 2 == 0 ? "scalar_then_optimized" : "optimized_then_scalar")
+                      << (scalarFirstSchedule[pair] ? "scalar_then_optimized"
+                                                    : "optimized_then_scalar")
                       << "\",\"scalar_ms\":" << scalarSamples[pair]
                       << ",\"optimized_ms\":" << optimizedSamples[pair]
                       << ",\"ratio\":" << ratios[pair] << '}';

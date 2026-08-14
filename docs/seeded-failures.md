@@ -15,11 +15,12 @@ The reduced predicate retains the failure code, output name, original shape, sel
 
 ## Repeated performance regression
 
-G5 runs a result-preserving identity kernel with and without one controlled device delay.
-The runner gathers 20 adjacent control and delayed observations.
+G5 calibrates a result-preserving identity kernel to a target ratio of 1.10 and records exact baseline and delayed timings.
+The runner gathers 20 hardware-valid adjacent observations with the locked balanced randomized order schedule.
 
 The performance reducer cannot use a single slow observation.
-It retains at least 20 pairs and requires the one-sided lower bootstrap bound to exceed the 10 percent seed allowance.
+It retains exactly 20 accepted pairs and requires the one-sided lower bootstrap bound to exceed the locked 3 percent practical allowance.
+The 10 percent value describes the injected target, not the allowed regression boundary.
 
 The clean control verifies that the delay does not alter output values.
 

@@ -27,13 +27,14 @@ Cases include aligned, unaligned tail, zero, large finite, noncontiguous-generat
 
 ## Artifact locks
 
-Corpus materialization rejects an existing destination and writes a complete artifact inventory.
+Corpus materialization writes through a staging directory and publishes an immutable content-addressed destination only after the complete artifact inventory and materializer identity verify.
+An existing identity is reused only when every byte and the producer identity match.
 Every entry records a relative path, SHA-256 digest, byte count, and media type.
 
 Run the public materializer with:
 
 ```bash
-uv run --frozen upgrade-guard corpus materialize corpus/registry.yaml --out .upgrade-guard/corpora/v1-core --json
+uv run --frozen upgrade-guard corpus materialize corpus/registry.yaml --out DIR --json
 ```
 
 The command also runs the locked CPU reference for each supported reduced-precision artifact.

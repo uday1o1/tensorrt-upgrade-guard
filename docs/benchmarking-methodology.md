@@ -10,7 +10,7 @@ The `trtexec` adapter selects `--infStreams=1` or the legacy `--streams=1` only 
 
 ## Paired blocks
 
-The runner alternates baseline and candidate blocks with deterministic order randomization.
+The runner uses a precommitted seeded and balanced randomized order with ten observations in each order for a 20-pair focused benchmark.
 It accepts at least 20 adjacent pairs per required shape.
 It retries rejected blocks up to the authored bound but never converts an invalid block into passing evidence.
 
@@ -35,10 +35,12 @@ The checked-in `scripts/validate_aa.py` rejects an unstable or policy-violating 
 
 ## Memory and build evidence
 
-Three independent engine builds record engine bytes, engine-reported device memory, build duration, inspector output, and warnings.
-Runtime memory, engine file size, and engine-reported device memory remain separate fields.
+Three independent engine builds record engine bytes, engine-reported device memory, build duration, cold or warm timing-cache state, inspector output, warnings, builder host RSS, and coarse builder GPU-process observations.
+Correctness runs separately record execution-context device memory, I/O device allocation, host RSS, and coarse GPU-process observations.
+Runtime memory, engine file size, engine-reported device memory, execution-context memory, coarse GPU memory, and host memory remain separately labeled fields.
 
 ## Profiling boundary
 
 Nsight Systems and Nsight Compute runs start only after the unprofiled benchmark.
 Profiler measurements never update the primary qualification result.
+One bounded Nsight Compute counter-permission probe runs earlier to prevent a restricted host from failing only after the costly gates.

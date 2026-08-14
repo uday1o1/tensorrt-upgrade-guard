@@ -478,6 +478,18 @@
       "title": "Corpus Lock Id",
       "type": "string"
     },
+    "corpus_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Corpus Root"
+    },
     "determinism": {
       "$ref": "#/$defs/DeterminismPolicy"
     },

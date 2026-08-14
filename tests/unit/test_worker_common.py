@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from upgrade_guard.containers.commands import command_sha256
 from upgrade_guard.worker.common import (
+    command_evidence,
     load_json,
     process_memory_evidence,
     sha256_file,
@@ -26,6 +28,21 @@ def test_worker_common_hashes_and_atomically_publishes_json(tmp_path: Path) -> N
     assert load_json(output) == {"status": "passed", "values": [1, 2]}
     assert json.loads(output.read_text(encoding="utf-8"))["status"] == "passed"
     assert not list(output.parent.glob(".result.json.*"))
+
+
+def test_worker_command_evidence_is_stable_and_argument_safe() -> None:
+    first = command_evidence("upgrade_guard.worker.build_engine", ["--model", "a b.onnx"])
+    second = command_evidence("upgrade_guard.worker.build_engine", ["--model", "a b.onnx"])
+    assert first == second
+    assert first["command"] == [
+        "python3",
+        "-m",
+        "upgrade_guard.worker.build_engine",
+        "--model",
+        "a b.onnx",
+    ]
+    assert str(first["command_sha256"]).startswith("sha256:")
+    assert first["command_sha256"] == command_sha256(first["command"])  # type: ignore[arg-type]
 
 
 def test_worker_atomic_writer_cleans_up_on_serialization_failure(tmp_path: Path) -> None:
@@ -47,3 +64,16 @@ def test_process_memory_evidence_keeps_host_and_gpu_sources_separate(
     assert evidence["host_peak_rss_bytes"] > 0
     assert evidence["gpu_process_rows"] == ["GPU-1, 7, python3, 12"]
     assert "coarse" in evidence["gpu_process_observation"]
+
+
+def test_process_memory_evidence_tolerates_unavailable_nvidia_smi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise FileNotFoundError
+
+    monkeypatch.setattr("upgrade_guard.worker.common.subprocess.run", unavailable)
+    evidence = process_memory_evidence()
+    assert evidence["host_peak_rss_bytes"] > 0
+    assert evidence["gpu_process_rows"] == []

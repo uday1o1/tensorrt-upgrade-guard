@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,67 +18,78 @@ from upgrade_guard.errors import FailureCode
 from upgrade_guard.reduce.session import reduce_failure_directory
 from upgrade_guard.reproduce.bundle import BundleExport, export_bundle
 from upgrade_guard.reproduce.run import prepare_replay
-from upgrade_guard.reproduce.verify import materialize_verified_bundle, verify_bundle
+from upgrade_guard.reproduce.verify import materialize_verified_bundle
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--project", type=Path, required=True)
+    parser.add_argument("--core-corpus", type=Path, required=True)
     parser.add_argument("--plugin-corpus", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     arguments = parser.parse_args()
     state = arguments.state.resolve(strict=True)
     project = arguments.project.resolve(strict=True)
-    corpus = arguments.plugin_corpus.resolve(strict=True)
-    root = state / "reductions"
-    root.mkdir(parents=True, exist_ok=True)
-    records = [
-        json.loads(line)
-        for line in (state / "faults" / "gpu-fault-samples.jsonl").read_text().splitlines()
-        if line
-    ]
-    if len(records) != 20:
-        raise RuntimeError("remote reduction requires 20 seeded GPU observations")
-    signature = sha256_bytes(canonical_json_bytes(records))
-    numerical = _numerical(root, records, signature)
-    performance = _performance(root, records, signature)
-    profile = _profile(root, signature)
-    matrix = MatrixLock.model_validate_json(
-        (state / "matrix.lock.json").read_text(encoding="utf-8")
-    )
-    bundles = {
-        "G2": _g2_bundle(root, state, project, corpus, matrix, signature),
-        "G7": _g7_bundle(root, state, project, matrix, signature),
-    }
-    clean_bundles: dict[str, dict[str, object]] = {}
-    for seed, bundle in bundles.items():
-        clean = root / f"{seed}-clean-bundle"
-        verified = (
-            verify_bundle(clean) if clean.exists() else materialize_verified_bundle(bundle, clean)
+    core_corpus = arguments.core_corpus.resolve(strict=True)
+    plugin_corpus = arguments.plugin_corpus.resolve(strict=True)
+    output = (arguments.output or state / "reductions" / "prepared").resolve()
+    if output.exists() or output.is_symlink():
+        raise RuntimeError("refusing to overwrite prepared reduction evidence")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".prepared.", dir=output.parent))
+    try:
+        records = [
+            json.loads(line)
+            for line in (state / "gpu-faults" / "gpu-fault-samples.jsonl").read_text().splitlines()
+            if line
+        ]
+        if len(records) != 20:
+            raise RuntimeError("remote reduction requires 20 seeded GPU observations")
+        signature = sha256_bytes(canonical_json_bytes(records))
+        numerical = _numerical(staging, records, signature)
+        performance = _performance(staging, records, signature)
+        profile = _profile(staging, signature)
+        matrix = MatrixLock.model_validate_json(
+            (state / "matrix.lock.json").read_text(encoding="utf-8")
         )
-        plan = prepare_replay(clean, trust_source_code=True, trust_included_engine=False)
-        if plan.selected_gpu_uuid != matrix.gpu_uuid or not plan.source_paths:
-            raise RuntimeError("clean replay plan does not preserve the locked GPU and sources")
-        clean_bundles[seed] = {
-            "bundle_manifest_sha256": verified.manifest.manifest_sha256,
-            "bundle_id": plan.bundle_id,
-            "source_paths": plan.source_paths,
-            "clean_directory": str(clean),
+        bundles = {
+            "G2": _g2_bundle(staging, state, project, plugin_corpus, matrix, signature),
+            "G7": _g7_bundle(staging, state, project, core_corpus, matrix, signature),
         }
-    result = {
-        "schema_version": "upgradeguard.dev/reduction-replay/v1",
-        "status": "prepared",
-        "signature_sha256": signature,
-        "numerical": numerical,
-        "performance": performance,
-        "profile": profile,
-        "selected_gpu_uuid": plan.selected_gpu_uuid,
-        "clean_bundles": clean_bundles,
-    }
-    (root / "prepared.json").write_text(
-        json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+        clean_bundles: dict[str, dict[str, object]] = {}
+        selected_gpu_uuid: str | None = None
+        for seed, bundle in bundles.items():
+            clean = staging / f"{seed}-clean-bundle"
+            verified = materialize_verified_bundle(bundle, clean)
+            plan = prepare_replay(clean, trust_source_code=True, trust_included_engine=False)
+            if plan.selected_gpu_uuid != matrix.gpu_uuid or not plan.source_paths:
+                raise RuntimeError("clean replay plan does not preserve the locked GPU and sources")
+            selected_gpu_uuid = plan.selected_gpu_uuid
+            clean_bundles[seed] = {
+                "bundle_manifest_sha256": verified.manifest.manifest_sha256,
+                "bundle_id": plan.bundle_id,
+                "source_paths": plan.source_paths,
+                "clean_directory": f"{seed}-clean-bundle",
+            }
+        result = {
+            "schema_version": "upgradeguard.dev/reduction-replay/v1",
+            "status": "prepared",
+            "signature_sha256": signature,
+            "numerical": numerical,
+            "performance": performance,
+            "profile": profile,
+            "selected_gpu_uuid": selected_gpu_uuid,
+            "clean_bundles": clean_bundles,
+        }
+        (staging / "prepared.json").write_text(
+            json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        staging.replace(output)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 def _request(failure_code: str, signature: str, predicate: dict[str, object]) -> dict[str, object]:
@@ -275,7 +288,11 @@ def _g2_bundle(
                     },
                     {
                         "id": "seeded-failure",
-                        "command": ["/output/build/upgrade_guard_gpu_faults"],
+                        "command": [
+                            "/output/build/upgrade_guard_gpu_faults",
+                            "--pair-index",
+                            "0",
+                        ],
                         "stdout_json_equals": {"G2.detected": True, "G2.control": "passed"},
                     },
                 ],
@@ -358,6 +375,7 @@ def _g7_bundle(
     root: Path,
     state: Path,
     project: Path,
+    core: Path,
     matrix: MatrixLock,
     signature: str,
 ) -> Path:
@@ -492,7 +510,6 @@ def _g7_bundle(
         threshold="maximum tokens shape [8, 512, 256]",
         evidence=(),
     )
-    core = project / ".upgrade-guard" / "corpora" / "v1-core"
     export_bundle(
         BundleExport(
             id=f"G7-{signature.removeprefix('sha256:')[:12]}",
@@ -501,7 +518,10 @@ def _g7_bundle(
             candidate_environment=candidate_path,
             qualification=state / "full.yaml",
             model=core / "models" / "tiny-transformer-fp32.onnx",
-            inputs=(state / "faults" / "g7" / "tokens.npy", state / "faults" / "g7" / "mask.npy"),
+            inputs=(
+                state / "fault-inputs" / "g7" / "tokens.npy",
+                state / "fault-inputs" / "g7" / "mask.npy",
+            ),
             expected_failure=expected,
             extra_files={
                 "commands/replay.json": commands,

@@ -168,6 +168,7 @@ def test_worker_build_context_excludes_repository_state() -> None:
     ]
     dockerfile = Path("containers/Dockerfile.worker").read_text(encoding="utf-8")
     requirements = Path("containers/requirements-worker.txt").read_text(encoding="utf-8")
+    assert "ARG BASE_IMAGE=nvcr.io/nvidia/tensorrt:" in dockerfile
     assert "--require-hashes" in dockerfile
     assert "--hash=sha256:" in requirements
 

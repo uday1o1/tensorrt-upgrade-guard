@@ -78,7 +78,7 @@ class QualificationRunner:
             raise InvalidInputError("qualification and environment lock IDs differ")
         if specification.hardware_validity.selected_gpu_uuid != matrix.gpu_uuid:
             raise InvalidInputError("qualification and environment lock GPU UUIDs differ")
-        corpus_root = self.source_root / ".upgrade-guard" / "corpora" / specification.corpus_lock_id
+        corpus_root = _corpus_root(self.source_root, specification)
         corpus = _load_model(corpus_root / "corpus.lock.json", CorpusLock, "corpus lock")
         if corpus.id != specification.corpus_lock_id:
             raise InvalidInputError("qualification and corpus lock IDs differ")
@@ -164,6 +164,8 @@ class QualificationRunner:
             memory = _memory_evidence(
                 builds[specification.baseline_environment_id],
                 builds[specification.candidate_environment_id],
+                runs[specification.baseline_environment_id],
+                runs[specification.candidate_environment_id],
             )
             all_case_evidence.append({"precision": suffix, "memory": memory})
             for outcome in (memory["engine_bytes"]["outcome"], memory["device_memory"]["outcome"]):
@@ -545,7 +547,7 @@ class QualificationRunner:
             gpu_uuid=matrix.gpu_uuid,
             mounts=WorkerMounts(
                 self.source_root,
-                self.source_root / ".upgrade-guard" / "corpora" / specification.corpus_lock_id,
+                _corpus_root(self.source_root, specification),
                 staging,
             ),
             command=command,
@@ -567,6 +569,25 @@ def compare_stored_run(directory: Path) -> dict[str, Any]:
     }:
         raise InvalidInputError("run summary status is invalid")
     return summary
+
+
+def _corpus_root(source_root: Path, specification: QualificationSpec) -> Path:
+    authored = specification.corpus_root
+    if authored is None:
+        path = source_root / ".upgrade-guard" / "corpora" / specification.corpus_lock_id
+    else:
+        relative = Path(authored)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise InvalidInputError("qualification corpus root must be project-relative")
+        path = source_root / relative
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise InvalidInputError("qualification corpus root is unavailable") from error
+    source = source_root.resolve(strict=True)
+    if not resolved.is_relative_to(source) or path.is_symlink() or not resolved.is_dir():
+        raise InvalidInputError("qualification corpus root escaped the source tree")
+    return resolved
 
 
 def _compare_correctness_case(
@@ -635,6 +656,20 @@ def _compare_correctness_case(
             "candidate_to_baseline": decision.candidate_to_baseline.model_dump(mode="json"),
             "baseline_determinism": baseline_determinism.model_dump(mode="json"),
             "candidate_determinism": candidate_determinism.model_dump(mode="json"),
+            "worker_commands": {
+                "baseline": {
+                    "command": baseline["command"],
+                    "command_sha256": baseline["command_sha256"],
+                },
+                "candidate": {
+                    "command": candidate["command"],
+                    "command_sha256": candidate["command_sha256"],
+                },
+            },
+            "worker_memory_diagnostics": {
+                "baseline": baseline.get("memory_diagnostics"),
+                "candidate": candidate.get("memory_diagnostics"),
+            },
             "failure_code": failure.value if failure else None,
         },
         failure,
@@ -657,7 +692,10 @@ def _output_paths(run: dict[str, Any], output_name: str, output_root: Path) -> t
 
 
 def _memory_evidence(
-    baseline_builds: list[dict[str, Any]], candidate_builds: list[dict[str, Any]]
+    baseline_builds: list[dict[str, Any]],
+    candidate_builds: list[dict[str, Any]],
+    baseline_runs: dict[str, dict[str, Any]],
+    candidate_runs: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     baseline_engine = tuple(int(item["engine"]["bytes"]) for item in baseline_builds)
     candidate_engine = tuple(int(item["engine"]["bytes"]) for item in candidate_builds)
@@ -668,6 +706,40 @@ def _memory_evidence(
     return {
         "engine_bytes": _jsonable(asdict(engine_size_gate(baseline_engine, candidate_engine))),
         "device_memory": _jsonable(asdict(device_memory_gate(baseline_device, candidate_device))),
+        "measurement_sources": {
+            "baseline": _memory_sources(baseline_builds, baseline_runs),
+            "candidate": _memory_sources(candidate_builds, candidate_runs),
+        },
+    }
+
+
+def _memory_sources(
+    builds: list[dict[str, Any]], runs: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "serialized_engine_bytes": [int(item["engine"]["bytes"]) for item in builds],
+        "engine_reported_device_memory_bytes": [
+            int(item["engine"]["device_memory_bytes"]) for item in builds
+        ],
+        "builder_diagnostics": [item.get("memory_diagnostics") for item in builds],
+        "builds": [
+            {
+                "environment_id": item["environment_id"],
+                "command": item["command"],
+                "command_sha256": item["command_sha256"],
+                "engine": item["engine"],
+                "inspector": item.get("inspector"),
+                "timing_cache": item.get("timing_cache"),
+                "timing_cache_state": item.get("timing_cache_state"),
+                "strongly_typed": item.get("strongly_typed"),
+                "builder_warnings": item.get("builder_warnings", []),
+                "duration_seconds": item.get("duration_seconds"),
+            }
+            for item in builds
+        ],
+        "execution_context_diagnostics_by_shape": {
+            shape: run.get("memory_diagnostics") for shape, run in sorted(runs.items())
+        },
     }
 
 
@@ -691,11 +763,23 @@ def _resolve_authored_path(source: Path, value: str) -> Path:
 
 
 def _verify_corpus(root: Path, lock: CorpusLock) -> None:
+    excluded = {root / "corpus.lock.json"}
+    materializer = root / "materializer.json"
+    if materializer.is_file() and not materializer.is_symlink():
+        value = _read_json(materializer)
+        identity = value.get("materializer_sha256")
+        if (
+            not isinstance(identity, str)
+            or not identity.startswith("sha256:")
+            or root.name != identity.removeprefix("sha256:")
+        ):
+            raise InvalidInputError("corpus materializer identity differs from its path")
+        excluded.add(materializer)
     expected = {artifact.path: artifact for artifact in lock.artifacts}
     observed = {
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
-        if path.is_file() and path.name != "corpus.lock.json"
+        if path.is_file() and path not in excluded
     }
     if observed != set(expected):
         raise InvalidInputError("materialized corpus inventory differs from lock")

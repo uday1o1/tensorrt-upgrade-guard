@@ -236,8 +236,13 @@ transformer_shapes:
 """,
         encoding="utf-8",
     )
-    corpus = tmp_path / ".upgrade-guard" / "corpora" / "fixture"
+    corpus_identity = "a" * 64
+    corpus = tmp_path / ".upgrade-guard" / "corpora" / "by-id" / "core" / corpus_identity
     materialize_corpus(recipe, corpus)
+    (corpus / "materializer.json").write_text(
+        json.dumps({"materializer_sha256": f"sha256:{corpus_identity}"}) + "\n",
+        encoding="utf-8",
+    )
 
     matrix = MatrixLock(
         api_version="upgradeguard.dev/v1alpha1",
@@ -259,6 +264,7 @@ baseline_environment_id: baseline
 candidate_environment_id: candidate
 environment_lock: {matrix_path}
 corpus_lock_id: fixture
+corpus_root: .upgrade-guard/corpora/by-id/core/{corpus_identity}
 required_cases: [tiny-transformer]
 precision_modes: [fp32]
 optimization_profiles:

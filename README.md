@@ -9,7 +9,7 @@ The repository is useful to reviewers who want a concrete example of TensorRT, C
 
 | Area | Current evidence |
 | --- | --- |
-| CPU control plane | Locally verified on Python 3.12 with 192 tests and the configured 90 percent coverage gate. |
+| CPU control plane | Locally verified on Python 3.12 with the complete configured test suite and 90 percent coverage gate. |
 | Environment resolution | Exact OCI index, manifest, configuration, base, and derived-worker identities are implemented and tested with adversarial fixtures. |
 | GPU qualification | Implemented, but no public pass or performance claim exists until the checked-in revision completes on a compatible NVIDIA GPU. |
 | CUDA plugin track | Source, scalar and optimized tactics, fault seeds, sanitizer commands, and focused profiler commands are implemented; real GPU gates remain pending. |
@@ -45,7 +45,7 @@ The primary decision keeps these evidence types separate:
 
 - Linux x86-64;
 - one NVIDIA GPU visible through `nvidia-smi`;
-- Docker with NVIDIA Container Toolkit GPU support;
+- Docker with working `--gpus device=<UUID>` NVIDIA GPU injection;
 - access to the exact container digests in `matrices/examples/controlled-minor.yaml`;
 - enough local space for two worker images and generated evidence;
 - an idle selected GPU during accepted performance blocks.
@@ -91,7 +91,11 @@ COMPLETE evidence=<repository>/.upgrade-guard/cuda-pm/runs/<commit>/evidence.jso
 ```
 
 The runner stores source-revision-specific completion markers.
+Each marker binds its complete owned artifact inventory, direct dependency markers, matrix lock, corpus identities, selected GPU, run mode, and source commit.
 Run the same command again after an interruption to resume at the next incomplete step.
+
+Host-side NVIDIA Container Toolkit version provenance may be unavailable on a managed machine.
+The matrix gate still fails closed unless both exact immutable workers execute successfully on the selected GPU UUID.
 
 Select a different visible GPU by index when needed.
 

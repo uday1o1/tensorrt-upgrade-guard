@@ -86,6 +86,7 @@ class QualificationSpec(StrictModel):
     candidate_environment_id: str
     environment_lock: str
     corpus_lock_id: str
+    corpus_root: str | None = None
     required_cases: tuple[str, ...]
     precision_modes: tuple[PrecisionMode, ...]
     optimization_profiles: tuple[OptimizationProfile, ...]

@@ -19,7 +19,8 @@ Q/DQ transformer qualification remains excluded until the locked CPU reference p
 
 ## Platform scope
 
-The complete workflow targets Linux x86-64 with Docker and NVIDIA Container Toolkit.
+The complete workflow targets Linux x86-64 with Docker GPU injection for one selected NVIDIA UUID.
+Host-side NVIDIA Container Toolkit version provenance may be unavailable even when the exact capability probe succeeds.
 Jetson, Windows, Triton Server, Dynamo, Kubernetes, and multi-GPU execution are outside V1.
 
 ## Reproduction scope
@@ -31,3 +32,9 @@ TensorRT API Capture and Replay remains post-V1 because the project has no C++ b
 
 The paired bootstrap supports a decision for the declared shapes and policy.
 It does not predict every latency percentile, concurrency level, power mode, or deployment environment.
+
+## Dependency-audit scope
+
+The release gate audits the exact host Python lock and the hash-locked Python packages added by the worker Dockerfile.
+Worker SPDX documents inventory preinstalled NGC Python packages, Debian packages, and proprietary NVIDIA packages.
+Those inventory-only scopes are not claimed vulnerability-free by this repository.
