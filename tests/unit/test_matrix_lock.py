@@ -23,6 +23,7 @@ from upgrade_guard.matrix.lock import (
     WORKER_BASE_DIGEST_LABEL,
     MatrixLocker,
     _host_observation,
+    _nvidia_container_toolkit_version,
     _parse_matrix,
     _read_matrix,
     _validate_pair,
@@ -353,6 +354,28 @@ class FallbackToolkitRunner:
         return CommandResult(command, 127, "", "missing", 0.01)
 
 
+class ExactToolkitRunner:
+    def __init__(self, target: tuple[str, ...], output: str) -> None:
+        self.target = target
+        self.output = output
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        del timeout_seconds, cwd, env
+        command = tuple(args)
+        if command == self.target:
+            return CommandResult(command, 0, self.output, "", 0.01)
+        if command == ("nvidia-container-cli", "--version"):
+            raise InfrastructureError("probe timed out")
+        return CommandResult(command, 127, "", "missing", 0.01)
+
+
 def test_host_observation_falls_back_to_nvidia_ctk() -> None:
     doctor = supported_doctor().model_copy(
         update={"docker": supported_doctor().docker.model_copy(update={"runtimes": ("runc",)})}
@@ -362,6 +385,49 @@ def test_host_observation_falls_back_to_nvidia_ctk() -> None:
     assert observation.nvidia_container_toolkit_version.startswith("NVIDIA")
     with pytest.raises(InfrastructureError, match="could not be observed"):
         _host_observation(doctor, FallbackToolkitRunner(succeeds=False))
+
+
+@pytest.mark.parametrize(
+    ("command", "output"),
+    [
+        (
+            ("nvidia-container-runtime", "--version"),
+            "NVIDIA Container Runtime version 1.18.0\n",
+        ),
+        (
+            (
+                "dpkg-query",
+                "--show",
+                "--showformat=${binary:Package}=${Version}\\n",
+                "nvidia-container-toolkit",
+            ),
+            "nvidia-container-toolkit=1.18.0-1\n",
+        ),
+        (
+            (
+                "dpkg-query",
+                "--show",
+                "--showformat=${binary:Package}=${Version}\\n",
+                "libnvidia-container1",
+            ),
+            "libnvidia-container1=1.18.0-1\n",
+        ),
+        (
+            (
+                "rpm",
+                "--query",
+                "--queryformat",
+                "%{NAME}=%{VERSION}-%{RELEASE}\\n",
+                "nvidia-container-toolkit",
+            ),
+            "nvidia-container-toolkit=1.18.0-1\n",
+        ),
+    ],
+)
+def test_toolkit_version_uses_runtime_and_package_metadata_fallbacks(
+    command: tuple[str, ...], output: str
+) -> None:
+    assert _nvidia_container_toolkit_version(ExactToolkitRunner(command, output)) == output.strip()
 
 
 def test_pair_validation_rejects_gpu_driver_and_host_drift() -> None:

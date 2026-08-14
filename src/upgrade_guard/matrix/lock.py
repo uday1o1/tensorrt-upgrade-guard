@@ -36,6 +36,39 @@ from upgrade_guard.matrix.probe import DockerWorkerProbe, ProbeExecution
 
 WORKER_BASE_DIGEST_LABEL = "com.udayarora.upgradeguard.base.manifest.digest"
 
+_TOOLKIT_VERSION_COMMANDS = (
+    ("nvidia-container-cli", "--version"),
+    ("nvidia-ctk", "--version"),
+    ("nvidia-container-runtime", "--version"),
+    *(
+        (
+            "dpkg-query",
+            "--show",
+            "--showformat=${binary:Package}=${Version}\\n",
+            package,
+        )
+        for package in (
+            "nvidia-container-toolkit",
+            "nvidia-container-toolkit-base",
+            "libnvidia-container1",
+        )
+    ),
+    *(
+        (
+            "rpm",
+            "--query",
+            "--queryformat",
+            "%{NAME}=%{VERSION}-%{RELEASE}\\n",
+            package,
+        )
+        for package in (
+            "nvidia-container-toolkit",
+            "nvidia-container-toolkit-base",
+            "libnvidia-container1",
+        )
+    ),
+)
+
 
 class ImageResolver(Protocol):
     """Immutable image resolver interface."""
@@ -195,11 +228,7 @@ def _host_observation(doctor: DoctorResult, runner: Runner) -> HostObservation:
     docker = doctor.docker
     if not docker.available or not docker.client_version or not docker.server_version:
         raise InfrastructureError("Docker version evidence is incomplete")
-    toolkit = runner.run(("nvidia-container-cli", "--version"), timeout_seconds=15)
-    if toolkit.returncode != 0:
-        toolkit = runner.run(("nvidia-ctk", "--version"), timeout_seconds=15)
-    if toolkit.returncode != 0:
-        raise InfrastructureError("NVIDIA Container Toolkit version could not be observed")
+    toolkit_version = _nvidia_container_toolkit_version(runner)
     runtime = "nvidia" if "nvidia" in docker.runtimes else "cdi"
     architecture = cast(Literal["x86_64", "amd64"], doctor.host_architecture)
     return HostObservation(
@@ -209,7 +238,31 @@ def _host_observation(doctor: DoctorResult, runner: Runner) -> HostObservation:
         docker_client_version=docker.client_version,
         docker_server_version=docker.server_version,
         docker_runtime=runtime,
-        nvidia_container_toolkit_version=(toolkit.stdout or toolkit.stderr).strip().splitlines()[0],
+        nvidia_container_toolkit_version=toolkit_version,
+    )
+
+
+def _nvidia_container_toolkit_version(runner: Runner) -> str:
+    attempts: list[dict[str, object]] = []
+    for command in _TOOLKIT_VERSION_COMMANDS:
+        try:
+            result = runner.run(command, timeout_seconds=15)
+        except InfrastructureError as error:
+            attempts.append({"command": list(command), "error": error.message})
+            continue
+        output = (result.stdout.strip() or result.stderr.strip()).splitlines()
+        if result.returncode == 0 and output and output[0].strip():
+            return output[0].strip()[:256]
+        attempts.append(
+            {
+                "command": list(command),
+                "returncode": result.returncode,
+                "error": (result.stderr or result.stdout).strip()[:256],
+            }
+        )
+    raise InfrastructureError(
+        "NVIDIA Container Toolkit version could not be observed",
+        details={"attempts": attempts},
     )
 
 
