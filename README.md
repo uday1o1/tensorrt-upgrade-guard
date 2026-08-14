@@ -82,7 +82,8 @@ Then run the resumable qualification from a clean tracked checkout.
 bash scripts/run_cuda_pm_qualification.sh
 ```
 
-The runner locks the selected GPU and worker identities, materializes the corpora, runs core and extended gates, executes sanitizer seeds and controls, captures focused profiles, creates worker SBOMs, and writes a final evidence index.
+The runner locks the selected GPU and worker identities, materializes the corpora, and proves both exact workers can build and reload representative engines before long statistical gates.
+It then runs the core and extended gates, executes sanitizer seeds and controls, captures post-benchmark focused profiles, validates worker SBOMs, and writes a final evidence index.
 
 A successful run ends with a line shaped like this:
 

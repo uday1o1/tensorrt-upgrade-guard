@@ -35,6 +35,7 @@ STEP_OWNED_PATHS: dict[str, tuple[str, ...]] = {
     "matrix-lock": ("matrix.yaml", "full.yaml", "matrix.lock.json"),
     "corpus-materialization": ("corpora.json",),
     "plugin-build": ("plugin-build/",),
+    "target-readiness": ("target-readiness/",),
     "profiler-preflight": ("profiler-preflight/",),
     "aa-pilot": ("aa/",),
     "core-qualification": ("core-run/",),
@@ -77,8 +78,9 @@ STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     ),
     "matrix-lock": ("worker-images", "gpu-runtime-preflight"),
     "plugin-build": ("matrix-lock", "corpus-materialization"),
+    "target-readiness": ("plugin-build", "matrix-lock", "corpus-materialization"),
     "profiler-preflight": ("plugin-build",),
-    "aa-pilot": ("matrix-lock", "corpus-materialization", "profiler-preflight"),
+    "aa-pilot": ("matrix-lock", "corpus-materialization"),
     "core-qualification": ("aa-pilot", "matrix-lock", "corpus-materialization"),
     "gpu-smoke": ("matrix-lock", "corpus-materialization", "plugin-build"),
     "plugin-benchmark": ("plugin-build", "profiler-preflight"),
@@ -134,6 +136,9 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
         "matrix-lock",
         "plugin-build",
         "profiler-preflight",
+        "target-readiness",
+        "sanitizers",
+        "sboms",
         "aa-pilot",
         "core-qualification",
         "plugin-benchmark",
@@ -146,9 +151,7 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
         "replay-G7",
         "reduction-validation",
         "memory-seed",
-        "sanitizers",
         "profiles",
-        "sboms",
         "final-evidence",
         "terminal-cleanup",
     ),
@@ -181,6 +184,8 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
 # These paths were already semantic gates in marker v1. They remain a second
 # line of defense in addition to exact file inventory.
 PASSING_JSON: dict[str, tuple[str, ...]] = {
+    "dependency-audit": ("supply-chain/triage.json",),
+    "target-readiness": ("target-readiness/validation.json",),
     "profiler-preflight": ("profiler-preflight/validation.json",),
     "aa-pilot": ("aa/validation.json",),
     "core-qualification": ("core-run/qualification-summary.json",),
@@ -194,6 +199,9 @@ PASSING_JSON: dict[str, tuple[str, ...]] = {
     "gpu-faults": ("gpu-faults/validation.json",),
     "reduction-validation": ("reductions/validation.json",),
     "memory-seed": ("memory-seed/validation.json",),
+    "sanitizers": ("sanitizers/validation.json",),
+    "profiles": ("profiles/validation.json",),
+    "sboms": ("sbom/validation.json",),
     "final-evidence": ("evidence.json", "results.json"),
 }
 

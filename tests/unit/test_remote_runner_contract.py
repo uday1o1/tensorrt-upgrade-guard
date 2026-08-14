@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 RUNNER = Path("scripts/run_cuda_pm_qualification.sh")
+KERNEL_BENCHMARK = Path("cpp/tests/kernel_benchmark.cu")
 
 
 def test_full_runner_orders_early_and_candidate_gates_fail_closed() -> None:
@@ -19,6 +20,9 @@ def test_full_runner_orders_early_and_candidate_gates_fail_closed() -> None:
         "run_step matrix-lock",
         "run_step plugin-compile-test",
         "run_step profiler-preflight",
+        "run_step target-readiness",
+        "run_step sanitizers",
+        "run_step sboms",
         "run_step aa-pilot",
         "run_step core-qualification",
         "run_step plugin-benchmark",
@@ -104,6 +108,14 @@ def test_runner_uses_bounded_preflight_and_evidence_timeouts() -> None:
         in text
     )
     assert "bounded_run quick python3 scripts/check_capacity.py" in text
+    assert (
+        'bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py verify'
+        in text
+    )
+    assert (
+        'bounded_run evidence "${UV[@]}" run --frozen python '
+        "scripts/qualification_state.py reconcile" in text
+    )
 
 
 def test_bounded_modes_do_not_materialize_mobilenet_or_run_dependency_audit() -> None:
@@ -115,3 +127,44 @@ def test_bounded_modes_do_not_materialize_mobilenet_or_run_dependency_audit() ->
         "  run_step corpus-materialization materialize_corpora"
     )
     assert materialization in text
+
+
+def test_profiler_benchmark_uses_registered_nvtx_domain_message() -> None:
+    text = KERNEL_BENCHMARK.read_text(encoding="utf-8")
+    profile_only = text[text.index("bool profileOnly()") : text.index("} // namespace")]
+    assert 'nvtxDomainCreateA("upgrade_guard")' in profile_only
+    assert 'nvtxDomainRegisterStringA(domain, "residual_rmsnorm_optimized")' in profile_only
+    assert "event.messageType = NVTX_MESSAGE_TYPE_REGISTERED;" in profile_only
+    assert "event.message.registered = rangeName;" in profile_only
+    assert "NVTX_MESSAGE_TYPE_ASCII" not in profile_only
+    assert "event.message.ascii" not in profile_only
+
+
+def test_profiler_permission_is_early_but_diagnostics_stay_after_benchmark() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    preflight = text[
+        text.index("run_profiler_preflight() {") : text.index("run_target_readiness() {")
+    ]
+    profiles = text[text.index("run_profiles() {") : text.index("generate_sboms() {")]
+    assert "--profile-only" in preflight
+    assert "--section SpeedOfLight" in preflight
+    assert "scripts/validate_ncu_capability.py" in preflight
+    assert "NSIGHT_COMPUTE_COUNTER_PERMISSION_UNAVAILABLE" in preflight
+    assert "--list-sections" in preflight
+    assert "--wait=true" in profiles
+    assert "ERR_NVGPUCTRPERM" in profiles
+    assert text.rindex("run_step profiler-preflight") < text.rindex("run_step target-readiness")
+    assert text.rindex("run_step plugin-benchmark") < text.rindex("run_step profiles")
+
+
+def test_full_readiness_exercises_both_workers_and_all_three_workloads() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    readiness = text[
+        text.index("run_target_readiness() {") : text.index("run_plugin_benchmark() {")
+    ]
+    assert "local names=(baseline candidate)" in readiness
+    assert "tiny-transformer-fp32.onnx" in readiness
+    assert "tail-random-h259" in readiness
+    assert "mobilenetv3-small-075-dynamic.onnx" in readiness
+    assert "scripts/validate_target_readiness.py" in readiness
+    assert "--repetitions 2" in readiness

@@ -14,10 +14,10 @@ from scripts.generate_remote_evidence import (
     _validate_clean_replays,
     _validate_cuda_benchmark,
     _validate_pip_audit,
-    _validate_profile_summary,
     _validate_sanitizer_evidence,
     _validate_spdx,
 )
+from scripts.validate_profiler_outputs import validate_summary
 from upgrade_guard.containers.commands import command_sha256
 
 
@@ -41,7 +41,7 @@ def test_semantic_publication_inputs_are_validated(tmp_path: Path) -> None:
 
     _validate_spdx(sbom, expected_image=image)
     _validate_pip_audit(audit)
-    _validate_profile_summary(profile)
+    validate_summary(profile, summary_kind="nsys")
 
     audit.write_text(
         json.dumps([{"name": "package", "vulns": [{"id": "CVE-TEST"}]}]),
@@ -51,7 +51,7 @@ def test_semantic_publication_inputs_are_validated(tmp_path: Path) -> None:
         _validate_pip_audit(audit)
     profile.write_text("TensorRT Release banner only\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="selected kernel"):
-        _validate_profile_summary(profile)
+        validate_summary(profile, summary_kind="nsys")
 
 
 def test_inventory_excludes_active_log_and_generated_outputs(tmp_path: Path) -> None:

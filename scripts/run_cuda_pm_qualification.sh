@@ -86,7 +86,7 @@ run_step() {
   local name=$1
   shift
   CURRENT_STEP="${name}"
-  if bounded_run quick "${UV[@]}" run --frozen python scripts/qualification_state.py verify \
+  if bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py verify \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step "${name}" \
     --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"; then
     printf 'SKIP completed step: %s\n' "${name}"
@@ -100,7 +100,7 @@ run_step() {
   fi
   printf 'RUN step: %s\n' "${name}"
   "$@" 2>&1 | tee "${LOG_ROOT}/${name}.log"
-  bounded_run quick "${UV[@]}" run --frozen python scripts/qualification_state.py record \
+  bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step "${name}" \
     --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
   if [[ "${THROUGH_STEP}" == "${name}" ]]; then
@@ -116,7 +116,7 @@ run_always_step() {
   "$@"
   printf 'validated step=%s source=%s\n' "${name}" "${SOURCE_ID}" \
     > "${LOG_ROOT}/${name}.log"
-  bounded_run quick "${UV[@]}" run --frozen python scripts/qualification_state.py record \
+  bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step "${name}" \
     --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
   if [[ "${THROUGH_STEP}" == "${name}" ]]; then
@@ -317,7 +317,7 @@ ensure_worker_registry() {
   fi
   printf 'Worker registry content is absent; rebuilding exact workers.\n'
   build_workers 2>&1 | tee -a "${LOG_ROOT}/worker-images.log"
-  bounded_run quick "${UV[@]}" run --frozen python scripts/qualification_state.py record \
+  bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step worker-images \
     --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
 }
@@ -349,7 +349,7 @@ preserve_stale_matrix() {
 }
 
 reconcile_state() {
-  bounded_run quick "${UV[@]}" run --frozen python scripts/qualification_state.py reconcile \
+  bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py reconcile \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" \
     --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
 }
@@ -581,47 +581,176 @@ compile_plugins() {
   done
 }
 
+write_profiler_preflight_failure() {
+  local error_code=$1
+  local observed_exit_code=$2
+  local prerequisite=$3
+  local output="${STATE_ROOT}/profiler-preflight"
+  PROFILE_VALIDATION="${output}/validation.json" ERROR_CODE_VALUE="${error_code}" \
+    NCU_STATUS_VALUE="${observed_exit_code}" PREREQUISITE_VALUE="${prerequisite}" \
+    bounded_run quick "${UV[@]}" run --frozen python -c \
+    'import json,os; from pathlib import Path; p=Path(os.environ["PROFILE_VALIDATION"]); v={"schema_version":"upgradeguard.dev/profiler-preflight/v3","status":"infrastructure_invalid","capability_only":True,"primary_performance_gate":False,"diagnostic_profile":False,"hardware_counter_collection":True,"counter_permission_verified":False,"error_code":os.environ["ERROR_CODE_VALUE"],"observed_exit_code":int(os.environ["NCU_STATUS_VALUE"]),"resume_prerequisite":os.environ["PREREQUISITE_VALUE"]}; p.write_text(json.dumps(v,indent=2,sort_keys=True)+"\n")'
+  cat "${output}/validation.json" >&2
+}
+
 run_profiler_preflight() {
   load_worker_identities
   local output="${STATE_ROOT}/profiler-preflight"
-  local executable=/state/plugin-build/candidate/build/upgrade_guard_kernel_benchmark
   mkdir -p "${output}"
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     ncu --version > "${output}/ncu-version.txt"
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     ncu --help > "${output}/ncu-help.txt"
-  grep -F -- '--kernel-name-base' "${output}/ncu-help.txt" >/dev/null
+  for option in --target-processes --kernel-name-base --kernel-name --launch-count \
+    --section --force-overwrite --export --import --csv --page --list-sections; do
+    grep -F -- "${option}" "${output}/ncu-help.txt" >/dev/null
+  done
+  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
+    ncu --list-sections > "${output}/ncu-sections.txt"
+  for section in SpeedOfLight MemoryWorkloadAnalysis LaunchStats Occupancy; do
+    grep -F "${section}" "${output}/ncu-sections.txt" >/dev/null
+  done
+  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
+    nsys --version > "${output}/nsys-version.txt"
+  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
+    nsys profile --help > "${output}/nsys-profile-help.txt"
+  for option in --trace --sample --capture-range --nvtx-capture --capture-range-end \
+    --wait --force-overwrite --output; do
+    grep -F -- "${option}" "${output}/nsys-profile-help.txt" >/dev/null
+  done
+  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
+    nsys export --help > "${output}/nsys-export-help.txt"
+  for option in --type --force-overwrite --output; do
+    grep -F -- "${option}" "${output}/nsys-export-help.txt" >/dev/null
+  done
+  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
+    nsys stats --help > "${output}/nsys-stats-help.txt"
+  for option in --report --format; do
+    grep -F -- "${option}" "${output}/nsys-stats-help.txt" >/dev/null
+  done
   set +e
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     ncu --target-processes all --kernel-name-base demangled \
       --kernel-name regex:residualRmsNormFloat4 --launch-count 1 \
-      --section LaunchStats --force-overwrite \
-      --export /output/counter-permission-probe \
-      "${executable}" --profile-only \
-      > "${output}/probe.stdout" 2> "${output}/probe.stderr"
-  local probe_status=$?
+      --section SpeedOfLight --force-overwrite \
+      --export /output/protected-counter-capability \
+      /state/plugin-build/candidate/build/upgrade_guard_kernel_benchmark --profile-only \
+      > "${output}/counter-capability.stdout" \
+      2> "${output}/counter-capability.stderr"
+  local ncu_status=$?
   set -e
-  if [[ ${probe_status} -ne 0 ]]; then
-    local error_code=NSIGHT_COMPUTE_PROBE_FAILED
-    local prerequisite='Verify that Nsight Compute can collect one hardware counter on the selected GPU.'
-    if grep -F 'ERR_NVGPUCTRPERM' "${output}/probe.stderr" >/dev/null; then
+  if [[ ${ncu_status} -ne 0 ]] \
+    || grep -F 'ERR_NVGPUCTRPERM' "${output}/counter-capability.stdout" >/dev/null \
+    || grep -F 'ERR_NVGPUCTRPERM' "${output}/counter-capability.stderr" >/dev/null; then
+    local error_code=NSIGHT_COMPUTE_COUNTER_CAPABILITY_FAILED
+    local prerequisite='Review the retained bounded Nsight Compute capability stdout and stderr.'
+    if grep -F 'ERR_NVGPUCTRPERM' "${output}/counter-capability.stdout" \
+      "${output}/counter-capability.stderr" >/dev/null; then
       error_code=NSIGHT_COMPUTE_COUNTER_PERMISSION_UNAVAILABLE
       prerequisite='Ask the machine administrator to enable NVIDIA GPU performance counters, then rerun the qualification command.'
     fi
-    PROFILER_VALIDATION="${output}/validation.json" ERROR_CODE_VALUE="${error_code}" \
-      PREREQUISITE_VALUE="${prerequisite}" PROBE_STATUS_VALUE="${probe_status}" \
-      bounded_run quick "${UV[@]}" run --frozen python -c \
-      'import json,os; from pathlib import Path; p=Path(os.environ["PROFILER_VALIDATION"]); v={"schema_version":"upgradeguard.dev/profiler-preflight/v1","status":"infrastructure_invalid","error_code":os.environ["ERROR_CODE_VALUE"],"observed_exit_code":int(os.environ["PROBE_STATUS_VALUE"]),"resume_prerequisite":os.environ["PREREQUISITE_VALUE"]}; p.write_text(json.dumps(v,indent=2,sort_keys=True)+"\n")'
-    cat "${output}/validation.json" >&2
+    write_profiler_preflight_failure "${error_code}" "${ncu_status}" "${prerequisite}"
     return 4
   fi
+  set +e
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
-    ncu --import /output/counter-permission-probe.ncu-rep --csv --page details \
-      > "${output}/counter-permission-probe.csv"
-  grep -F 'residualRmsNormFloat4' "${output}/counter-permission-probe.csv" >/dev/null
-  PROFILER_VALIDATION="${output}/validation.json" \
-    bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,os; from pathlib import Path; p=Path(os.environ["PROFILER_VALIDATION"]); p.write_text(json.dumps({"schema_version":"upgradeguard.dev/profiler-preflight/v1","status":"passed","gpu_counter_collection":True,"kernel":"residualRmsNormFloat4"},indent=2,sort_keys=True)+"\n")'
+    ncu --import /output/protected-counter-capability.ncu-rep --csv --page details \
+      > "${output}/counter-capability.csv" \
+      2> "${output}/counter-capability-import.stderr"
+  local import_status=$?
+  set -e
+  if [[ ${import_status} -ne 0 ]]; then
+    write_profiler_preflight_failure NSIGHT_COMPUTE_COUNTER_EVIDENCE_INVALID \
+      "${import_status}" 'Review the retained bounded Nsight Compute capability import stderr.'
+    return 4
+  fi
+  set +e
+  bounded_run quick "${UV[@]}" run --frozen python scripts/validate_ncu_capability.py \
+    --summary "${output}/counter-capability.csv" \
+    --report "${output}/protected-counter-capability.ncu-rep" \
+    --output "${output}/validation.json"
+  local validation_status=$?
+  set -e
+  if [[ ${validation_status} -ne 0 ]]; then
+    write_profiler_preflight_failure NSIGHT_COMPUTE_COUNTER_EVIDENCE_INVALID \
+      "${validation_status}" 'The capability report did not contain the selected kernel and a finite protected-counter measurement.'
+    return 4
+  fi
+}
+
+run_target_readiness() {
+  load_worker_identities
+  local output="${STATE_ROOT}/target-readiness"
+  local names=(baseline candidate)
+  local images=("${BASELINE_WORKER}" "${CANDIDATE_WORKER}")
+  for index in 0 1; do
+    local environment="${names[${index}]}"
+    local image="${images[${index}]}"
+    local root="${output}/${environment}"
+    mkdir -p "${root}/standard" "${root}/plugin/fp32" "${root}/mobilenet"
+    cp "${STATE_ROOT}/plugin-build/${environment}/build/libupgrade_guard_residual_rmsnorm.so" \
+      "${root}/plugin/fp32/libupgrade_guard_residual_rmsnorm.so"
+    write_transformer_profile "${root}/standard/profile.json"
+    write_plugin_profile "${root}/plugin/fp32/profile.json"
+    write_mobilenet_profile "${root}/mobilenet/profile.json"
+    gpu_run "${image}" "${CORE_CORPUS}" "${output}" \
+      python3 -m upgrade_guard.worker.build_engine \
+        --model /corpus/models/tiny-transformer-fp32.onnx \
+        --profile "/output/${environment}/standard/profile.json" \
+        --engine "/output/${environment}/standard/engine.plan" \
+        --inspector "/output/${environment}/standard/inspector.json" \
+        --timing-cache "/output/${environment}/standard/timing.cache" \
+        --result "/output/${environment}/standard/build.json"
+    local case_name
+    for case_name in b1_s8 b1_s128; do
+      gpu_run "${image}" "${CORE_CORPUS}" "${output}" \
+        python3 -m upgrade_guard.worker.run_correctness \
+          --engine "/output/${environment}/standard/engine.plan" \
+          --input "tokens=/corpus/inputs/tiny-transformer-fp32/${case_name}/tokens.npy" \
+          --input "mask=/corpus/inputs/tiny-transformer-fp32/${case_name}/mask.npy" \
+          --output "/output/${environment}/standard/${case_name}/outputs" \
+          --result "/output/${environment}/standard/${case_name}/correctness.json" \
+          --repetitions 2
+    done
+    local plugin="/output/${environment}/plugin/fp32/libupgrade_guard_residual_rmsnorm.so"
+    gpu_run "${image}" "${PLUGIN_CORPUS}" "${output}" \
+      python3 -m upgrade_guard.worker.build_engine \
+        --model /corpus/residual-rmsnorm-fp32.onnx \
+        --profile "/output/${environment}/plugin/fp32/profile.json" \
+        --engine "/output/${environment}/plugin/fp32/engine.plan" \
+        --inspector "/output/${environment}/plugin/fp32/inspector.json" \
+        --timing-cache "/output/${environment}/plugin/fp32/timing.cache" \
+        --result "/output/${environment}/plugin/fp32/build.json" \
+        --plugin "${plugin}"
+    gpu_run "${image}" "${PLUGIN_CORPUS}" "${output}" \
+      python3 -m upgrade_guard.worker.run_correctness \
+        --engine "/output/${environment}/plugin/fp32/engine.plan" \
+        --input x=/corpus/fp32/tail-random-h259/x.npy \
+        --input residual=/corpus/fp32/tail-random-h259/residual.npy \
+        --input gamma=/corpus/fp32/tail-random-h259/gamma.npy \
+        --output "/output/${environment}/plugin/fp32/tail-random-h259/outputs" \
+        --result "/output/${environment}/plugin/fp32/tail-random-h259/correctness.json" \
+        --repetitions 2 --plugin "${plugin}"
+    gpu_run "${image}" "${MOBILENET_CORPUS}" "${output}" \
+      python3 -m upgrade_guard.worker.build_engine \
+        --model /corpus/mobilenetv3-small-075-dynamic.onnx \
+        --profile "/output/${environment}/mobilenet/profile.json" \
+        --engine "/output/${environment}/mobilenet/engine.plan" \
+        --inspector "/output/${environment}/mobilenet/inspector.json" \
+        --timing-cache "/output/${environment}/mobilenet/timing.cache" \
+        --result "/output/${environment}/mobilenet/build.json"
+    gpu_run "${image}" "${MOBILENET_CORPUS}" "${output}" \
+      python3 -m upgrade_guard.worker.run_correctness \
+        --engine "/output/${environment}/mobilenet/engine.plan" \
+        --input x=/corpus/inputs/minimum/x.npy \
+        --output "/output/${environment}/mobilenet/minimum/outputs" \
+        --result "/output/${environment}/mobilenet/minimum/correctness.json" \
+        --repetitions 2
+  done
+  bounded_run quick "${UV[@]}" run --frozen python scripts/validate_target_readiness.py \
+    --core-corpus "${CORE_CORPUS}" --plugin-corpus "${PLUGIN_CORPUS}" \
+    --mobilenet-corpus "${MOBILENET_CORPUS}" --runs "${output}" \
+    --output "${output}/validation.json" --repetitions 2
 }
 
 run_plugin_benchmark() {
@@ -658,12 +787,7 @@ run_gpu_smoke() {
   mkdir -p "${output}/plugin" "${output}/standard"
   cp "${plugin_source}" "${output}/plugin/libupgrade_guard_residual_rmsnorm.so"
   write_plugin_profile "${output}/plugin/profile.json"
-  cat > "${output}/standard/profile.json" <<'JSON'
-{
-  "tokens": {"min": [1, 8, 256], "opt": [4, 128, 256], "max": [8, 512, 256]},
-  "mask": {"min": [1, 1, 1, 8], "opt": [4, 1, 1, 128], "max": [8, 1, 1, 512]}
-}
-JSON
+  write_transformer_profile "${output}/standard/profile.json"
   gpu_run "${CANDIDATE_WORKER}" "${CORE_CORPUS}" "${output}" \
     python3 -m upgrade_guard.worker.build_engine \
       --model /corpus/models/tiny-transformer-fp32.onnx \
@@ -704,6 +828,16 @@ JSON
   bounded_run quick "${UV[@]}" run --frozen python scripts/validate_gpu_smoke.py \
     --core-corpus "${CORE_CORPUS}" --plugin-corpus "${PLUGIN_CORPUS}" \
     --runs "${output}" --output "${output}/validation.json"
+}
+
+write_transformer_profile() {
+  local destination=$1
+  cat > "${destination}" <<'JSON'
+{
+  "tokens": {"min": [1, 8, 256], "opt": [4, 128, 256], "max": [8, 512, 256]},
+  "mask": {"min": [1, 1, 1, 8], "opt": [4, 1, 1, 128], "max": [8, 1, 1, 512]}
+}
+JSON
 }
 
 write_plugin_profile() {
@@ -1129,28 +1263,27 @@ run_sanitizers() {
   bounded_run quick "${UV[@]}" run --frozen python -c \
     'import json,sys; from pathlib import Path; log=Path(sys.argv[1]); out=Path(sys.argv[2]); json.dump({"expected":"SANITIZER_FAILURE","observed_exit_code":86,"diagnostic":"out_of_bounds_global_access","diagnostic_log_sha256":__import__("upgrade_guard.contracts.base",fromlist=["sha256_file"]).sha256_file(log),"control":"passed"},out.open("w"),indent=2,sort_keys=True)' \
     "${output}/sanitizer-tail-oob.log" "${output}/sanitizer-seed.json"
+  SANITIZER_ROOT="${output}" bounded_run quick "${UV[@]}" run --frozen python -c \
+    'import json,os; from pathlib import Path; from upgrade_guard.contracts.base import sha256_file; root=Path(os.environ["SANITIZER_ROOT"]); seed=json.load((root/"sanitizer-seed.json").open()); controls={};
+for tool in ("memcheck","racecheck","initcheck","synccheck"):
+ p=root/f"sanitizer-{tool}-control.log"; controls[tool]={"sha256":sha256_file(p),"bytes":p.stat().st_size}
+value={"schema_version":"upgradeguard.dev/sanitizer-validation/v1","status":"passed","seed":seed,"controls":controls}; (root/"validation.json").write_text(json.dumps(value,indent=2,sort_keys=True)+"\n")'
 }
 
 run_profiles() {
   load_worker_identities
   local output="${STATE_ROOT}/profiles"
   mkdir -p "${output}"
-  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
-    nsys --version
-  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
-    ncu --version
-  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
-    nsys profile --help > "${output}/nsys-profile-help.txt"
-  grep -F -- '--nvtx-capture' "${output}/nsys-profile-help.txt" >/dev/null
-  gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
-    ncu --help > "${output}/ncu-help.txt"
-  grep -F -- '--kernel-name-base' "${output}/ncu-help.txt" >/dev/null
+  bounded_run quick "${UV[@]}" run --frozen python -c \
+    'import json,sys; v=json.load(open(sys.argv[1])); assert v["status"]=="passed" and v["measured_benefit"] and v["required_shapes_within_policy"] and not v["profiled"]' \
+    "${STATE_ROOT}/plugin-benchmark/plugin-benchmark.json"
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     nsys profile --trace=cuda,nvtx --sample=none --capture-range=nvtx \
       --nvtx-capture=residual_rmsnorm_optimized@upgrade_guard \
-      --capture-range-end=stop --force-overwrite=true \
+      --capture-range-end=stop --wait=true --force-overwrite=true \
       --output=/output/residual-rmsnorm-timeline \
-      /state/plugin-build/candidate/build/upgrade_guard_kernel_benchmark --profile-only
+      /state/plugin-build/candidate/build/upgrade_guard_kernel_benchmark --profile-only \
+      > "${output}/nsys-profile.stdout" 2> "${output}/nsys-profile.stderr"
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     nsys export --type=sqlite --force-overwrite=true \
       --output=/output/residual-rmsnorm-timeline.sqlite \
@@ -1159,16 +1292,44 @@ run_profiles() {
     nsys stats --report cuda_gpu_kern_sum --format csv \
       /output/residual-rmsnorm-timeline.nsys-rep \
       > "${output}/nsys-kernel-summary.csv"
+  set +e
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     ncu --target-processes all --kernel-name-base demangled \
       --kernel-name regex:residualRmsNormFloat4 \
       --launch-count 1 --section SpeedOfLight --section MemoryWorkloadAnalysis \
       --section LaunchStats --section Occupancy --force-overwrite \
       --export /output/residual-rmsnorm-kernel \
-      /state/plugin-build/candidate/build/upgrade_guard_kernel_benchmark --profile-only
+      /state/plugin-build/candidate/build/upgrade_guard_kernel_benchmark --profile-only \
+      > "${output}/ncu-profile.stdout" 2> "${output}/ncu-profile.stderr"
+  local ncu_status=$?
+  set -e
+  if [[ ${ncu_status} -ne 0 ]] \
+    || grep -F 'ERR_NVGPUCTRPERM' "${output}/ncu-profile.stdout" >/dev/null \
+    || grep -F 'ERR_NVGPUCTRPERM' "${output}/ncu-profile.stderr" >/dev/null; then
+    local error_code=NSIGHT_COMPUTE_PROFILE_FAILED
+    local prerequisite='Review the retained bounded Nsight Compute stdout and stderr.'
+    if grep -F 'ERR_NVGPUCTRPERM' "${output}/ncu-profile.stdout" \
+      "${output}/ncu-profile.stderr" >/dev/null; then
+      error_code=NSIGHT_COMPUTE_COUNTER_PERMISSION_UNAVAILABLE
+      prerequisite='Ask the machine administrator to enable NVIDIA GPU performance counters, then rerun the qualification command.'
+    fi
+    PROFILE_VALIDATION="${output}/validation.json" ERROR_CODE_VALUE="${error_code}" \
+      PREREQUISITE_VALUE="${prerequisite}" NCU_STATUS_VALUE="${ncu_status}" \
+      bounded_run quick "${UV[@]}" run --frozen python -c \
+      'import json,os; from pathlib import Path; p=Path(os.environ["PROFILE_VALIDATION"]); v={"schema_version":"upgradeguard.dev/profiler-validation/v1","status":"infrastructure_invalid","error_code":os.environ["ERROR_CODE_VALUE"],"observed_exit_code":int(os.environ["NCU_STATUS_VALUE"]),"resume_prerequisite":os.environ["PREREQUISITE_VALUE"]}; p.write_text(json.dumps(v,indent=2,sort_keys=True)+"\n")'
+    cat "${output}/validation.json" >&2
+    return 4
+  fi
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     ncu --import /output/residual-rmsnorm-kernel.ncu-rep --csv --page details \
       > "${output}/ncu-kernel-summary.csv"
+  bounded_run quick "${UV[@]}" run --frozen python scripts/validate_profiler_outputs.py \
+    --nsys-summary "${output}/nsys-kernel-summary.csv" \
+    --ncu-summary "${output}/ncu-kernel-summary.csv" \
+    --nsys-report "${output}/residual-rmsnorm-timeline.nsys-rep" \
+    --nsys-sqlite "${output}/residual-rmsnorm-timeline.sqlite" \
+    --ncu-report "${output}/residual-rmsnorm-kernel.ncu-rep" \
+    --output "${output}/validation.json"
 }
 
 generate_sboms() {
@@ -1183,6 +1344,12 @@ generate_sboms() {
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     python3 /opt/upgrade-guard/scripts/generate_worker_sbom.py \
       --image "${CANDIDATE_WORKER}" --output /output/candidate.spdx.json
+  bounded_run quick "${UV[@]}" run --frozen python scripts/validate_sboms.py \
+    --host "${output}/host.spdx.json" \
+    --baseline "${output}/baseline.spdx.json" \
+    --candidate "${output}/candidate.spdx.json" \
+    --baseline-image "${BASELINE_WORKER}" --candidate-image "${CANDIDATE_WORKER}" \
+    --lock uv.lock --output "${output}/validation.json"
 }
 
 audit_dependencies() {
@@ -1258,6 +1425,9 @@ if [[ "${SANITIZER_ONLY}" == "1" ]]; then
 fi
 run_step plugin-compile-test compile_plugins
 run_step profiler-preflight run_profiler_preflight
+run_step target-readiness run_target_readiness
+run_step sanitizers run_sanitizers
+run_step sboms generate_sboms
 run_step aa-pilot run_aa_pilot
 run_step core-qualification run_core_qualification
 run_step plugin-benchmark run_plugin_benchmark
@@ -1270,12 +1440,10 @@ run_step replay-G2 run_replay_seed G2
 run_step replay-G7 run_replay_seed G7
 run_step reduction-validation validate_reduction_replays
 run_step memory-seed run_memory_seed
-run_step sanitizers run_sanitizers
 run_step profiles run_profiles
-run_step sboms generate_sboms
 run_step final-evidence finalize
 CURRENT_STEP=terminal-cleanup
 terminal_cleanup 2>&1 | tee "${LOG_ROOT}/terminal-cleanup.log"
-bounded_run quick "${UV[@]}" run --frozen python scripts/qualification_state.py record \
+bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
   --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step terminal-cleanup \
   --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"

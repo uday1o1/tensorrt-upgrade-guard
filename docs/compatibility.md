@@ -47,5 +47,7 @@ A missing tool, unsupported option, mismatched UUID, label mismatch, registry fa
 An unavailable host-side NVIDIA Container Toolkit version does not by itself make the pair inconclusive because the two exact immutable GPU-container launches are the capability gate.
 The unavailable state is disclosed in the lock and cannot be replaced by an inferred runtime mode or fabricated version.
 Docker's CDI directories and discovered devices are retained as literal provenance, but neither inventory is accepted as proof that GPU injection works.
+On Docker 29, a `failed to discover GPU vendor from CDI` response with no observable toolkit source is classified as an unsupported host prerequisite.
+The rootful Docker daemon requires an administrator-configured NVIDIA Container Toolkit integration before matrix locking can proceed.
 
 Refer to [Environment locking](environment-locking.md) for the operator procedure.

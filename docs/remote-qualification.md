@@ -2,10 +2,15 @@
 
 **Goal**: Run every hardware-dependent gate with one resumable command.
 
-**Prerequisites**: Use a clean Linux x86-64 checkout with Docker, `nvidia-smi`, working Docker GPU injection, access to the locked NGC images, and at least 20 GiB free in both the workspace and Docker-volume storage.
+**Prerequisites**: Use a clean Linux x86-64 checkout with Docker, `nvidia-smi`, working Docker GPU injection, access to the locked NGC images, and sufficient workspace and Docker-volume storage.
+
+The default capacity policy requires 20 GiB and 100,000 free inodes for each storage root.
+When both roots share one filesystem, the runner requires the aggregate 40 GiB and 200,000 free inodes instead of counting the same free space twice.
 
 An unprivileged host may not expose an NVIDIA Container Toolkit binary or package record.
 That version observation may remain unavailable only when both exact immutable workers pass the real `docker run --gpus device=<UUID>` probe.
+If Docker reports that it cannot discover an NVIDIA GPU vendor from CDI and every toolkit source is unavailable, an administrator must install and configure NVIDIA Container Toolkit for the rootful Docker daemon.
+The runner classifies that state as `PREFLIGHT_UNSUPPORTED` before it builds workers or starts qualification.
 
 ## Select the repository
 
@@ -55,8 +60,10 @@ UG_THROUGH_STEP=profiles bash scripts/run_cuda_pm_qualification.sh
 ```
 
 Valid step names appear at the bottom of the runner script.
-The full workflow probes a real Nsight Compute counter immediately after the CUDA plugin build.
-If the host restricts performance counters, it stops before the long qualification gates with `NSIGHT_COMPUTE_COUNTER_PERMISSION_UNAVAILABLE` and the administrator prerequisite.
+The full workflow verifies exact Nsight CLI options and required section names immediately after the CUDA plugin build.
+It then runs one bounded candidate-worker `SpeedOfLight` collection to prove protected-counter permission before expensive qualification.
+That capability-only report is excluded from performance and diagnostic-profile claims.
+Both the early probe and the focused post-benchmark profile search both Nsight Compute streams for `ERR_NVGPUCTRPERM` and report `NSIGHT_COMPUTE_COUNTER_PERMISSION_UNAVAILABLE` with the administrator prerequisite.
 
 ## Run the trusted smoke path
 
@@ -65,6 +72,10 @@ UG_SMOKE_ONLY=1 bash scripts/run_cuda_pm_qualification.sh
 ```
 
 The smoke path locks the environment, materializes the frozen corpora, compiles both workers, runs CTest, builds a standard candidate engine, executes two transformer shapes, and executes the plugin tail shape 20 times.
+
+Full mode additionally runs a bounded readiness gate in both exact workers before A/A.
+That gate builds, reloads, and executes the standard transformer, the FP32 plugin tail case, and one dynamic MobileNet case against frozen CPU references.
+Compute Sanitizer controls and worker SBOM validation also complete before the long statistical gates.
 
 ## Verify completion
 

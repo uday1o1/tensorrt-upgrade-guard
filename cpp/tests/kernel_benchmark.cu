@@ -123,11 +123,13 @@ bool profileOnly()
         return false;
     }
     nvtxDomainHandle_t const domain = nvtxDomainCreateA("upgrade_guard");
+    nvtxStringHandle_t const rangeName
+        = nvtxDomainRegisterStringA(domain, "residual_rmsnorm_optimized");
     nvtxEventAttributes_t event{};
     event.version = NVTX_VERSION;
     event.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
-    event.messageType = NVTX_MESSAGE_TYPE_ASCII;
-    event.message.ascii = "residual_rmsnorm_optimized";
+    event.messageType = NVTX_MESSAGE_TYPE_REGISTERED;
+    event.message.registered = rangeName;
     nvtxDomainRangePushEx(domain, &event);
     for (std::int32_t index = 0; index < 20; ++index)
     {

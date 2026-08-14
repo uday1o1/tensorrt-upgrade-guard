@@ -348,6 +348,11 @@ def test_final_dependencies_are_exact_mode_specific_pre_final_set() -> None:
     }
     assert "gpu-smoke" not in full
     assert "dependency-audit" in full
+    assert "target-readiness" in full
+    assert set(qualification_state._dependencies_for("aa-pilot", "full")) == {
+        "matrix-lock",
+        "corpus-materialization",
+    }
     assert "final-evidence" not in qualification_state.MODE_STEPS["smoke"]
     assert "dependency-audit" not in qualification_state.MODE_STEPS["smoke"]
     assert "dependency-audit" not in qualification_state.MODE_STEPS["sanitizer"]
@@ -386,6 +391,27 @@ def test_reconcile_invalidates_descendants_but_preserves_valid_siblings(tmp_path
     stale_root = state / result["stale_root"]
     assert (stale_root / "replay-G7" / "reductions" / "G7").is_dir()
     assert (stale_root / "replay-G7" / "done" / "replay-G7.json").is_file()
+
+
+def test_reconcile_independent_gate_preserves_aa_and_core(tmp_path: Path) -> None:
+    state, project = _roots(tmp_path)
+    _record_closure(state, project, {"final-evidence"})
+    (state / "profiler-preflight" / "artifact.txt").write_text("tampered\n", encoding="utf-8")
+
+    result = qualification_state.reconcile(
+        state,
+        project,
+        source=SOURCE,
+        gpu=GPU,
+        mode="full",
+        dry_run=True,
+        now=FIXED_RECONCILE_TIME,
+    )
+
+    assert {"profiler-preflight", "plugin-benchmark", "profiles", "final-evidence"}.issubset(
+        result["invalid_steps"]
+    )
+    assert {"aa-pilot", "core-qualification"}.issubset(result["valid_steps"])
 
 
 def test_reconcile_prepare_drift_invalidates_both_replays(tmp_path: Path) -> None:

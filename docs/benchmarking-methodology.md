@@ -41,6 +41,9 @@ Runtime memory, engine file size, engine-reported device memory, execution-conte
 
 ## Profiling boundary
 
-Nsight Systems and Nsight Compute runs start only after the unprofiled benchmark.
+The full diagnostic Nsight Systems and Nsight Compute runs start only after the unprofiled benchmark.
 Profiler measurements never update the primary qualification result.
-One bounded Nsight Compute counter-permission probe runs earlier to prevent a restricted host from failing only after the costly gates.
+An early exact-worker preflight validates required CLI options and section names and runs one bounded Nsight Compute capability probe.
+The probe collects one `SpeedOfLight` section for the selected kernel solely to prove protected-counter permission before expensive qualification.
+Its report is labeled capability-only and is excluded from benchmark and diagnostic-profile claims.
+The focused post-benchmark capture remains the only profiling evidence used to explain measured behavior.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import re
 from datetime import UTC, datetime
@@ -13,6 +12,7 @@ from typing import Any
 import yaml
 
 from scripts.qualification_state import MODE_STEPS, verify_marker
+from scripts.validate_profiler_outputs import validate_summary
 from upgrade_guard.containers.commands import command_sha256
 from upgrade_guard.contracts.base import sha256_file
 from upgrade_guard.contracts.environment import MatrixLock
@@ -97,17 +97,6 @@ def _validate_pip_audit(path: Path) -> int:
     return len(dependencies)
 
 
-def _validate_profile_summary(path: Path) -> None:
-    text = path.read_text(encoding="utf-8")
-    if "residualRmsNorm" not in text or "TensorRT Release" in text:
-        raise RuntimeError(
-            f"profile summary lacks the selected kernel or contains a banner: {path}"
-        )
-    rows = list(csv.reader(line for line in text.splitlines() if line.strip()))
-    if not rows or not any(any("residualRmsNorm" in field for field in row) for row in rows):
-        raise RuntimeError(f"profile summary has no selected-kernel CSV row: {path}")
-
-
 def _validate_step_markers(
     state: Path,
     project: Path,
@@ -161,6 +150,7 @@ def _validate_sanitizer_evidence(state: Path) -> dict[str, Any]:
 
 def _build_manifest_table(state: Path) -> list[dict[str, Any]]:
     patterns = (
+        "target-readiness/**/build.json",
         "core-run/*/*/build-*.json",
         "plugin-runs/*/*/build.json",
         "mobilenet-runs/*/build.json",
@@ -456,6 +446,8 @@ def generate(state: Path, output: Path) -> None:
         gpu_uuid=matrix.gpu_uuid,
     )
     required_json = {
+        "target_readiness": state / "target-readiness" / "validation.json",
+        "profiler_preflight": state / "profiler-preflight" / "validation.json",
         "core_qualification": state / "core-run" / "qualification-summary.json",
         "plugin_validation": state / "plugin-runs" / "validation.json",
         "mobilenet_validation": state / "mobilenet-runs" / "validation.json",
@@ -464,6 +456,8 @@ def generate(state: Path, output: Path) -> None:
         "gpu_faults": state / "gpu-faults" / "validation.json",
         "reduction_replay": state / "reductions" / "validation.json",
         "memory_seed": state / "memory-seed" / "validation.json",
+        "profile_validation": state / "profiles" / "validation.json",
+        "sbom_validation": state / "sbom" / "validation.json",
     }
     values = {name: _passed(path) for name, path in required_json.items()}
     _validate_cuda_benchmark(values["cuda_benchmark"])
@@ -484,8 +478,6 @@ def generate(state: Path, output: Path) -> None:
         state / "profiles" / "nsys-kernel-summary.csv",
         state / "profiles" / "residual-rmsnorm-kernel.ncu-rep",
         state / "profiles" / "ncu-kernel-summary.csv",
-        state / "profiler-preflight" / "counter-permission-probe.ncu-rep",
-        state / "profiler-preflight" / "counter-permission-probe.csv",
         state / "plugin-build" / "baseline" / "build" / "compile_commands.json",
         state / "plugin-build" / "candidate" / "build" / "compile_commands.json",
         state / "plugin-build" / "candidate" / "build" / "libupgrade_guard_residual_rmsnorm.so",
@@ -493,12 +485,8 @@ def generate(state: Path, output: Path) -> None:
     for path in required_files:
         if not path.is_file() or path.stat().st_size == 0:
             raise RuntimeError(f"required remote artifact is absent or empty: {path}")
-    for path in (
-        state / "profiler-preflight" / "counter-permission-probe.csv",
-        state / "profiles" / "nsys-kernel-summary.csv",
-        state / "profiles" / "ncu-kernel-summary.csv",
-    ):
-        _validate_profile_summary(path)
+    validate_summary(state / "profiles" / "nsys-kernel-summary.csv", summary_kind="nsys")
+    validate_summary(state / "profiles" / "ncu-kernel-summary.csv", summary_kind="ncu")
     sbom_paths = {
         "baseline": state / "sbom" / "baseline.spdx.json",
         "candidate": state / "sbom" / "candidate.spdx.json",
@@ -575,6 +563,8 @@ def generate(state: Path, output: Path) -> None:
         "corpus_artifacts": corpus_artifacts,
         "qualification_policy": qualification_policy,
         "build_manifests": build_manifests,
+        "target_readiness": values["target_readiness"],
+        "profiler_preflight": values["profiler_preflight"],
         "core_qualification": values["core_qualification"],
         "plugin_validation": values["plugin_validation"],
         "mobilenet_validation": values["mobilenet_validation"],
@@ -583,7 +573,9 @@ def generate(state: Path, output: Path) -> None:
         "gpu_faults": values["gpu_faults"],
         "reduction_replay": values["reduction_replay"],
         "memory_seed": values["memory_seed"],
+        "profile_validation": values["profile_validation"],
         "sanitizer_evidence": sanitizer,
+        "sbom_validation": values["sbom_validation"],
         "profile_artifacts": {
             path.relative_to(state).as_posix(): {
                 "sha256": sha256_file(path),
@@ -591,7 +583,6 @@ def generate(state: Path, output: Path) -> None:
             }
             for path in required_files
             if path.is_relative_to(state / "profiles")
-            or path.is_relative_to(state / "profiler-preflight")
         },
         "dependency_audit_counts": dependency_audit_counts,
         "dependency_triage": dependency_triage,
