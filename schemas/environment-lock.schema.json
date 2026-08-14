@@ -126,21 +126,33 @@
           "title": "Docker Client Version",
           "type": "string"
         },
-        "docker_runtime": {
-          "title": "Docker Runtime",
-          "type": "string"
+        "docker_runtime_inventory": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Docker Runtime Inventory",
+          "type": "array"
         },
         "docker_server_version": {
           "title": "Docker Server Version",
           "type": "string"
+        },
+        "gpu_injection_interface": {
+          "const": "docker-gpus",
+          "title": "Gpu Injection Interface",
+          "type": "string"
+        },
+        "gpu_injection_verified": {
+          "const": true,
+          "title": "Gpu Injection Verified",
+          "type": "boolean"
         },
         "kernel": {
           "title": "Kernel",
           "type": "string"
         },
         "nvidia_container_toolkit_version": {
-          "title": "Nvidia Container Toolkit Version",
-          "type": "string"
+          "$ref": "#/$defs/NvidiaContainerToolkitVersionObservation"
         },
         "operating_system": {
           "title": "Operating System",
@@ -153,10 +165,134 @@
         "architecture",
         "docker_client_version",
         "docker_server_version",
-        "docker_runtime",
+        "docker_runtime_inventory",
+        "gpu_injection_interface",
+        "gpu_injection_verified",
         "nvidia_container_toolkit_version"
       ],
       "title": "HostObservation",
+      "type": "object"
+    },
+    "NvidiaContainerToolkitVersionAttempt": {
+      "additionalProperties": false,
+      "description": "One bounded host-side toolkit version observation attempt.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Command",
+          "type": "array"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "outcome": {
+          "enum": [
+            "observed",
+            "unavailable",
+            "error"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "returncode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Returncode"
+        },
+        "source": {
+          "enum": [
+            "nvidia-container-cli",
+            "nvidia-ctk",
+            "nvidia-container-runtime",
+            "dpkg",
+            "rpm"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "command",
+        "outcome"
+      ],
+      "title": "NvidiaContainerToolkitVersionAttempt",
+      "type": "object"
+    },
+    "NvidiaContainerToolkitVersionObservation": {
+      "additionalProperties": false,
+      "description": "Truthful host provenance for a toolkit version, when observable.",
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/NvidiaContainerToolkitVersionAttempt"
+          },
+          "title": "Attempts",
+          "type": "array"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "enum": [
+                "nvidia-container-cli",
+                "nvidia-ctk",
+                "nvidia-container-runtime",
+                "dpkg",
+                "rpm"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "status": {
+          "enum": [
+            "observed",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "status",
+        "attempts"
+      ],
+      "title": "NvidiaContainerToolkitVersionObservation",
       "type": "object"
     },
     "PlatformIdentity": {

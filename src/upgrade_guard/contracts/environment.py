@@ -83,6 +83,58 @@ class GpuObservation(StrictModel):
     power_limit_watts: float | None = Field(default=None, gt=0)
 
 
+NvidiaContainerToolkitVersionSource = Literal[
+    "nvidia-container-cli",
+    "nvidia-ctk",
+    "nvidia-container-runtime",
+    "dpkg",
+    "rpm",
+]
+
+
+class NvidiaContainerToolkitVersionAttempt(StrictModel):
+    """One bounded host-side toolkit version observation attempt."""
+
+    source: NvidiaContainerToolkitVersionSource
+    command: tuple[str, ...]
+    outcome: Literal["observed", "unavailable", "error"]
+    returncode: int | None = None
+    detail: str | None = None
+
+    @model_validator(mode="after")
+    def validate_attempt(self) -> NvidiaContainerToolkitVersionAttempt:
+        if not self.command or any(not component for component in self.command):
+            raise ValueError("toolkit version attempts require a complete command")
+        if self.outcome == "observed" and not self.detail:
+            raise ValueError("observed toolkit version attempts require evidence")
+        if self.outcome == "error" and not self.detail:
+            raise ValueError("failed toolkit version attempts require an error detail")
+        return self
+
+
+class NvidiaContainerToolkitVersionObservation(StrictModel):
+    """Truthful host provenance for a toolkit version, when observable."""
+
+    status: Literal["observed", "unavailable"]
+    version: str | None = None
+    source: NvidiaContainerToolkitVersionSource | None = None
+    attempts: tuple[NvidiaContainerToolkitVersionAttempt, ...]
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> NvidiaContainerToolkitVersionObservation:
+        if not self.attempts:
+            raise ValueError("toolkit version observation requires at least one attempt")
+        observed = [attempt for attempt in self.attempts if attempt.outcome == "observed"]
+        if self.status == "observed":
+            if not self.version or self.source is None:
+                raise ValueError("observed toolkit versions require a version and source")
+            if len(observed) != 1 or observed[0].source != self.source:
+                raise ValueError("observed toolkit version must match exactly one attempt")
+        elif self.version is not None or self.source is not None or observed:
+            raise ValueError("unavailable toolkit versions cannot contain observed details")
+        return self
+
+
 class HostObservation(StrictModel):
     """Host evidence that is shared by the locked worker pair."""
 
@@ -91,8 +143,10 @@ class HostObservation(StrictModel):
     architecture: Literal["x86_64", "amd64"]
     docker_client_version: str
     docker_server_version: str
-    docker_runtime: str
-    nvidia_container_toolkit_version: str
+    docker_runtime_inventory: tuple[str, ...]
+    gpu_injection_interface: Literal["docker-gpus"]
+    gpu_injection_verified: Literal[True]
+    nvidia_container_toolkit_version: NvidiaContainerToolkitVersionObservation
 
 
 class WorkerProbe(StrictModel):

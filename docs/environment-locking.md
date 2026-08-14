@@ -35,6 +35,10 @@ Docker must also be authenticated separately when the selected worker manifest r
 
 The lock is written atomically only after both exact workers launch on the selected GPU and all compatibility checks pass.
 Existing lock files are never overwritten.
+Host-side NVIDIA Container Toolkit version discovery is provenance, not a substitute for the exact worker launch.
+When no unprivileged toolkit binary or package record exposes a version, the lock records that version provenance as unavailable together with every attempted source.
+It does not infer that the toolkit is absent, invent a version, or infer a CDI runtime from Docker's named runtime inventory.
+The completed host record preserves Docker's literal runtime inventory and records `docker --gpus` injection as verified only after both immutable workers succeed on the selected UUID.
 
 Run the hardware gate from a Linux x86-64 host with the selected GPU idle and visible.
 

@@ -7,6 +7,7 @@ import os
 import platform
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -18,9 +19,13 @@ from upgrade_guard.containers.commands import CommandRunner, Runner
 from upgrade_guard.contracts.base import sha256_bytes
 from upgrade_guard.contracts.doctor import DoctorResult
 from upgrade_guard.contracts.environment import (
+    CompatibilityEvidence,
     EnvironmentLock,
     HostObservation,
     MatrixLock,
+    NvidiaContainerToolkitVersionAttempt,
+    NvidiaContainerToolkitVersionObservation,
+    NvidiaContainerToolkitVersionSource,
 )
 from upgrade_guard.contracts.matrix import MatrixSpec
 from upgrade_guard.doctor import run_doctor
@@ -36,16 +41,21 @@ from upgrade_guard.matrix.probe import DockerWorkerProbe, ProbeExecution
 
 WORKER_BASE_DIGEST_LABEL = "com.udayarora.upgradeguard.base.manifest.digest"
 
-_TOOLKIT_VERSION_COMMANDS = (
-    ("nvidia-container-cli", "--version"),
-    ("nvidia-ctk", "--version"),
-    ("nvidia-container-runtime", "--version"),
+_TOOLKIT_VERSION_COMMANDS: tuple[
+    tuple[NvidiaContainerToolkitVersionSource, tuple[str, ...]], ...
+] = (
+    ("nvidia-container-cli", ("nvidia-container-cli", "--version")),
+    ("nvidia-ctk", ("nvidia-ctk", "--version")),
+    ("nvidia-container-runtime", ("nvidia-container-runtime", "--version")),
     *(
         (
-            "dpkg-query",
-            "--show",
-            "--showformat=${binary:Package}=${Version}\\n",
-            package,
+            "dpkg",
+            (
+                "dpkg-query",
+                "--show",
+                "--showformat=${binary:Package}=${Version}\\n",
+                package,
+            ),
         )
         for package in (
             "nvidia-container-toolkit",
@@ -56,10 +66,13 @@ _TOOLKIT_VERSION_COMMANDS = (
     *(
         (
             "rpm",
-            "--query",
-            "--queryformat",
-            "%{NAME}=%{VERSION}-%{RELEASE}\\n",
-            package,
+            (
+                "rpm",
+                "--query",
+                "--queryformat",
+                "%{NAME}=%{VERSION}-%{RELEASE}\\n",
+                package,
+            ),
         )
         for package in (
             "nvidia-container-toolkit",
@@ -68,6 +81,27 @@ _TOOLKIT_VERSION_COMMANDS = (
         )
     ),
 )
+
+
+@dataclass(frozen=True)
+class _HostInventory:
+    operating_system: str
+    kernel: str
+    architecture: Literal["x86_64", "amd64"]
+    docker_client_version: str
+    docker_server_version: str
+    docker_runtime_inventory: tuple[str, ...]
+    toolkit_version: NvidiaContainerToolkitVersionObservation
+
+
+@dataclass(frozen=True)
+class _ObservedEnvironment:
+    identifier: str
+    base: ResolvedArtifact
+    worker: ResolvedArtifact
+    declared_base: str
+    execution: ProbeExecution
+    compatibility: CompatibilityEvidence
 
 
 class ImageResolver(Protocol):
@@ -141,8 +175,8 @@ class MatrixLocker:
                 details={"selected_gpu_uuid": specification.gpu_uuid},
             )
 
-        host = _host_observation(doctor, self.runner)
-        environments: list[EnvironmentLock] = []
+        host_inventory = _host_inventory(doctor, self.runner)
+        observed_environments: list[_ObservedEnvironment] = []
         for request in specification.environments:
             base = self.resolver.resolve_linux_amd64(request.base_image)
             worker = self.resolver.resolve_linux_amd64(request.worker_image)
@@ -176,22 +210,34 @@ class MatrixLocker:
                     f"environment {request.id} is incompatible",
                     details={"reasons": list(compatibility.reasons)},
                 )
-            environments.append(
-                EnvironmentLock(
-                    id=request.id,
-                    base_image=base.image,
-                    worker_image=worker.image,
-                    declared_base_manifest_digest=declared_base,
-                    probe=execution.probe,
-                    host=host,
+            observed_environments.append(
+                _ObservedEnvironment(
+                    identifier=request.id,
+                    base=base,
+                    worker=worker,
+                    declared_base=declared_base,
+                    execution=execution,
                     compatibility=compatibility,
-                    probe_command_sha256=execution.command_sha256,
-                    probe_output_sha256=execution.output_sha256,
-                    probed_at=self.clock(),
                 )
             )
-        if len(environments) != 2:
+        if len(observed_environments) != 2:
             raise InvalidInputError("matrix lock requires exactly two environments")
+        host = _host_observation(host_inventory)
+        environments = [
+            EnvironmentLock(
+                id=observed.identifier,
+                base_image=observed.base.image,
+                worker_image=observed.worker.image,
+                declared_base_manifest_digest=observed.declared_base,
+                probe=observed.execution.probe,
+                host=host,
+                compatibility=observed.compatibility,
+                probe_command_sha256=observed.execution.command_sha256,
+                probe_output_sha256=observed.execution.output_sha256,
+                probed_at=self.clock(),
+            )
+            for observed in observed_environments
+        ]
         _validate_pair(environments)
         zero_checksum = "sha256:" + ("0" * 64)
         lock = MatrixLock(
@@ -224,45 +270,88 @@ def _parse_matrix(source: bytes) -> MatrixSpec:
         ) from error
 
 
-def _host_observation(doctor: DoctorResult, runner: Runner) -> HostObservation:
+def _host_inventory(doctor: DoctorResult, runner: Runner) -> _HostInventory:
     docker = doctor.docker
     if not docker.available or not docker.client_version or not docker.server_version:
         raise InfrastructureError("Docker version evidence is incomplete")
     toolkit_version = _nvidia_container_toolkit_version(runner)
-    runtime = "nvidia" if "nvidia" in docker.runtimes else "cdi"
     architecture = cast(Literal["x86_64", "amd64"], doctor.host_architecture)
-    return HostObservation(
+    return _HostInventory(
         operating_system=_host_operating_system(),
         kernel=platform.release(),
         architecture=architecture,
         docker_client_version=docker.client_version,
         docker_server_version=docker.server_version,
-        docker_runtime=runtime,
-        nvidia_container_toolkit_version=toolkit_version,
+        docker_runtime_inventory=docker.runtimes,
+        toolkit_version=toolkit_version,
     )
 
 
-def _nvidia_container_toolkit_version(runner: Runner) -> str:
-    attempts: list[dict[str, object]] = []
-    for command in _TOOLKIT_VERSION_COMMANDS:
+def _host_observation(inventory: _HostInventory) -> HostObservation:
+    """Finalize capability evidence only after both exact workers pass."""
+
+    return HostObservation(
+        operating_system=inventory.operating_system,
+        kernel=inventory.kernel,
+        architecture=inventory.architecture,
+        docker_client_version=inventory.docker_client_version,
+        docker_server_version=inventory.docker_server_version,
+        docker_runtime_inventory=inventory.docker_runtime_inventory,
+        gpu_injection_interface="docker-gpus",
+        gpu_injection_verified=True,
+        nvidia_container_toolkit_version=inventory.toolkit_version,
+    )
+
+
+def _nvidia_container_toolkit_version(
+    runner: Runner,
+) -> NvidiaContainerToolkitVersionObservation:
+    attempts: list[NvidiaContainerToolkitVersionAttempt] = []
+    for source, command in _TOOLKIT_VERSION_COMMANDS:
         try:
             result = runner.run(command, timeout_seconds=15)
         except InfrastructureError as error:
-            attempts.append({"command": list(command), "error": error.message})
+            attempts.append(
+                NvidiaContainerToolkitVersionAttempt(
+                    source=source,
+                    command=command,
+                    outcome="error",
+                    detail=error.message[:256],
+                )
+            )
             continue
         output = (result.stdout.strip() or result.stderr.strip()).splitlines()
         if result.returncode == 0 and output and output[0].strip():
-            return output[0].strip()[:256]
+            version = output[0].strip()[:256]
+            attempts.append(
+                NvidiaContainerToolkitVersionAttempt(
+                    source=source,
+                    command=command,
+                    outcome="observed",
+                    returncode=0,
+                    detail=version,
+                )
+            )
+            return NvidiaContainerToolkitVersionObservation(
+                status="observed",
+                version=version,
+                source=source,
+                attempts=tuple(attempts),
+            )
         attempts.append(
-            {
-                "command": list(command),
-                "returncode": result.returncode,
-                "error": (result.stderr or result.stdout).strip()[:256],
-            }
+            NvidiaContainerToolkitVersionAttempt(
+                source=source,
+                command=command,
+                outcome="unavailable",
+                returncode=result.returncode,
+                detail=(result.stderr or result.stdout).strip()[:256] or None,
+            )
         )
-    raise InfrastructureError(
-        "NVIDIA Container Toolkit version could not be observed",
-        details={"attempts": attempts},
+    return NvidiaContainerToolkitVersionObservation(
+        status="unavailable",
+        version=None,
+        source=None,
+        attempts=tuple(attempts),
     )
 
 

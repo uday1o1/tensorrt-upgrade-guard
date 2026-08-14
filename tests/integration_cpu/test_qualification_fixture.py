@@ -17,6 +17,8 @@ from upgrade_guard.contracts.environment import (
     EnvironmentLock,
     HostObservation,
     MatrixLock,
+    NvidiaContainerToolkitVersionAttempt,
+    NvidiaContainerToolkitVersionObservation,
 )
 from upgrade_guard.corpus.materialize import materialize_corpus
 from upgrade_guard.corpus.reference import run_onnx_reference
@@ -186,8 +188,23 @@ def _environment(identifier: str, image_character: str) -> EnvironmentLock:
             architecture="x86_64",
             docker_client_version="29.0.0",
             docker_server_version="29.0.0",
-            docker_runtime="nvidia",
-            nvidia_container_toolkit_version="1.17.8",
+            docker_runtime_inventory=("nvidia", "runc"),
+            gpu_injection_interface="docker-gpus",
+            gpu_injection_verified=True,
+            nvidia_container_toolkit_version=NvidiaContainerToolkitVersionObservation(
+                status="observed",
+                version="1.17.8",
+                source="nvidia-container-cli",
+                attempts=(
+                    NvidiaContainerToolkitVersionAttempt(
+                        source="nvidia-container-cli",
+                        command=("nvidia-container-cli", "--version"),
+                        outcome="observed",
+                        returncode=0,
+                        detail="1.17.8",
+                    ),
+                ),
+            ),
         ),
         compatibility=CompatibilityEvidence(
             policy_version="fixture-v1",
