@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 from upgrade_guard.contracts.base import sha256_file
 from upgrade_guard.worker.build_engine import _capturing_logger, _strongly_typed_network_flags
@@ -168,3 +170,14 @@ def test_worker_build_context_excludes_repository_state() -> None:
     requirements = Path("containers/requirements-worker.txt").read_text(encoding="utf-8")
     assert "--require-hashes" in dockerfile
     assert "--hash=sha256:" in requirements
+
+
+def test_worker_numpy_lock_satisfies_pinned_ngc_numba_metadata() -> None:
+    requirements_in = Path("containers/requirements-worker.in").read_text(encoding="utf-8")
+    requirements_lock = Path("containers/requirements-worker.txt").read_text(encoding="utf-8")
+    locked_line = next(
+        line for line in requirements_lock.splitlines() if line.startswith("numpy==")
+    )
+    locked_version = locked_line.removeprefix("numpy==").split()[0]
+    assert f"numpy=={locked_version}" in requirements_in
+    assert Version(locked_version) in SpecifierSet(">=1.22,<2.5")
