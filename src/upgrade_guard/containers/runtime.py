@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from upgrade_guard.containers.commands import CommandResult, CommandRunner, Runner
+from upgrade_guard.containers.gpu_runtime import docker_gpu_failure_error
 from upgrade_guard.containers.security import validate_locked_image, validated_mount
-from upgrade_guard.errors import InfrastructureError, InvalidInputError
+from upgrade_guard.contracts.environment import NvidiaContainerToolkitVersionObservation
+from upgrade_guard.errors import InvalidInputError
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class DockerGpuWorker:
         command: Sequence[str],
         timeout_seconds: float,
         accepted_returncodes: Sequence[int] = (0,),
+        toolkit_observation: NvidiaContainerToolkitVersionObservation | None = None,
     ) -> CommandResult:
         """Execute one bounded worker command and require an accepted completion code."""
 
@@ -115,13 +118,14 @@ class DockerGpuWorker:
         try:
             result = self.runner.run(arguments, timeout_seconds=timeout_seconds)
             if result.returncode not in accepted:
-                raise InfrastructureError(
+                raise docker_gpu_failure_error(
                     "isolated GPU worker command failed",
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    toolkit_observation=toolkit_observation,
                     details={
                         "returncode": result.returncode,
                         "accepted_returncodes": list(accepted),
-                        "stdout": result.stdout[-4000:],
-                        "stderr": result.stderr[-4000:],
                     },
                 )
         except BaseException:

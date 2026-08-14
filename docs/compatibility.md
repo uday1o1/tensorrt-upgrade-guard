@@ -38,7 +38,7 @@ Each worker probe records:
 | Execution | `trtexec` path, hash, help hash, and option inventory |
 | Diagnostics | Compute Sanitizer, Nsight Systems, and Nsight Compute paths and versions |
 | Compilation | C, C++, CUDA compilers, CMake, Ninja, and required header paths |
-| Host | kernel, architecture, Docker client and server, literal runtime inventory, exact GPU injection result, and NVIDIA Container Toolkit version provenance when observable |
+| Host | kernel, architecture, Docker client and server, literal runtime inventory, CDI specification directories, discovered-device inventory, exact GPU injection result, and NVIDIA Container Toolkit version provenance when observable |
 
 ## Acceptance
 
@@ -46,5 +46,6 @@ The pair passes only when current compatibility policy accepts both exact worker
 A missing tool, unsupported option, mismatched UUID, label mismatch, registry failure, or inconclusive probe cannot pass.
 An unavailable host-side NVIDIA Container Toolkit version does not by itself make the pair inconclusive because the two exact immutable GPU-container launches are the capability gate.
 The unavailable state is disclosed in the lock and cannot be replaced by an inferred runtime mode or fabricated version.
+Docker's CDI directories and discovered devices are retained as literal provenance, but neither inventory is accepted as proof that GPU injection works.
 
 Refer to [Environment locking](environment-locking.md) for the operator procedure.

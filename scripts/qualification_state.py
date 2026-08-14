@@ -28,6 +28,7 @@ STEP_ALIASES: dict[str, str] = {
 STEP_OWNED_PATHS: dict[str, tuple[str, ...]] = {
     "preflight": ("source.commit", "gpu.uuid", "gpu-preflight.csv"),
     "cpu-verify": (),
+    "gpu-runtime-preflight": ("gpu-runtime-preflight.json",),
     "registry-bootstrap": ("registry-identity.json",),
     "capacity-preflight": ("capacity/",),
     "worker-images": ("worker-images.json",),
@@ -61,10 +62,11 @@ STEP_OWNED_PATHS: dict[str, tuple[str, ...]] = {
 STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "preflight": (),
     "cpu-verify": ("preflight",),
+    "gpu-runtime-preflight": ("cpu-verify",),
     "registry-bootstrap": ("cpu-verify",),
     "capacity-preflight": ("preflight", "registry-bootstrap"),
     "worker-images": ("cpu-verify", "registry-bootstrap", "capacity-preflight"),
-    "matrix-lock": ("worker-images",),
+    "matrix-lock": ("worker-images", "gpu-runtime-preflight"),
     "corpus-materialization": ("matrix-lock",),
     "plugin-build": ("matrix-lock", "corpus-materialization"),
     "profiler-preflight": ("plugin-build",),
@@ -116,6 +118,7 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
     "full": (
         "preflight",
         "cpu-verify",
+        "gpu-runtime-preflight",
         "registry-bootstrap",
         "capacity-preflight",
         "worker-images",
@@ -145,6 +148,7 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
     "smoke": (
         "preflight",
         "cpu-verify",
+        "gpu-runtime-preflight",
         "registry-bootstrap",
         "capacity-preflight",
         "worker-images",
@@ -156,6 +160,7 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
     "sanitizer": (
         "preflight",
         "cpu-verify",
+        "gpu-runtime-preflight",
         "registry-bootstrap",
         "capacity-preflight",
         "worker-images",

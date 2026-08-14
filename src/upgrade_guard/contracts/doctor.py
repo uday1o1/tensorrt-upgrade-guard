@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import StringConstraints
 
 from upgrade_guard.contracts.base import StrictModel
+
+NonemptyDockerValue = Annotated[str, StringConstraints(min_length=1)]
 
 
 class DoctorIssue(StrictModel):
@@ -26,6 +30,13 @@ class DoctorGpu(StrictModel):
     driver_version: str
 
 
+class DockerDiscoveredDevice(StrictModel):
+    """One normalized device reported by Docker's discovery inventory."""
+
+    source: NonemptyDockerValue
+    id: NonemptyDockerValue
+
+
 class DoctorDocker(StrictModel):
     """Docker client and server summary."""
 
@@ -35,6 +46,8 @@ class DoctorDocker(StrictModel):
     server_os: str | None = None
     server_architecture: str | None = None
     runtimes: tuple[str, ...] = ()
+    cdi_spec_dirs: tuple[NonemptyDockerValue, ...] = ()
+    discovered_devices: tuple[DockerDiscoveredDevice, ...] = ()
     context: str | None = None
 
 

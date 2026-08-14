@@ -11,7 +11,8 @@ import pytest
 
 from tests.factories import digest, resolved_image, worker_probe
 from upgrade_guard.containers.commands import CommandResult
-from upgrade_guard.errors import InfrastructureError
+from upgrade_guard.containers.gpu_runtime import observe_nvidia_container_toolkit_version
+from upgrade_guard.errors import InfrastructureError, UnsupportedEnvironmentError
 from upgrade_guard.matrix.probe import DockerWorkerProbe
 
 
@@ -129,6 +130,48 @@ def test_failed_probe_cleans_only_its_exact_container(tmp_path: Path) -> None:
     name = run_command[run_command.index("--name") + 1]
     assert cleanup == ("docker", "container", "rm", "--force", name)
     assert name.startswith("upgrade-guard-probe-")
+
+
+def test_target_cdi_failure_uses_typed_toolkit_evidence(tmp_path: Path) -> None:
+    script = tmp_path / "worker_probe.py"
+    script.write_text("", encoding="utf-8")
+    image = resolved_image()
+    runner = QueueRunner(
+        [
+            result(stdout="pulled"),
+            result(stdout=inspect_json(image.manifest_digest, image.config_digest)),
+            result(
+                returncode=1,
+                stderr=(
+                    "docker: Error response from daemon: failed to discover GPU vendor "
+                    "from CDI: no known GPU vendor found"
+                ),
+            ),
+            result(returncode=0),
+        ]
+    )
+
+    class UnavailableToolkitRunner:
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            timeout_seconds: float = 30.0,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del timeout_seconds, cwd, env
+            return CommandResult(tuple(args), 127, "", "command not found", 0.01)
+
+    observation = observe_nvidia_container_toolkit_version(UnavailableToolkitRunner())
+    with pytest.raises(UnsupportedEnvironmentError) as captured:
+        DockerWorkerProbe(runner, script_path=script).run(
+            image,
+            "GPU-11111111-1111-1111-1111-111111111111",
+            toolkit_observation=observation,
+        )
+    assert captured.value.details["diagnosis_code"] == "NVIDIA_CONTAINER_TOOLKIT_UNAVAILABLE"
+    assert runner.commands[-1][:4] == ("docker", "container", "rm", "--force")
 
 
 def test_timed_out_probe_cleans_only_its_exact_container(tmp_path: Path) -> None:

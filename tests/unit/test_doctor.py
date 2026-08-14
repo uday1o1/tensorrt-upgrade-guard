@@ -6,6 +6,8 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
+
 from upgrade_guard.containers.commands import CommandResult
 from upgrade_guard.doctor import doctor_exit_code, run_doctor
 from upgrade_guard.errors import InfrastructureError
@@ -39,7 +41,10 @@ def command_result(
 
 
 def docker_results(
-    *, architecture: str = "x86_64", runtimes: tuple[str, ...] = ("nvidia",)
+    *,
+    architecture: str = "x86_64",
+    runtimes: tuple[str, ...] = ("nvidia",),
+    info_overrides: Mapping[str, object] | None = None,
 ) -> dict[tuple[str, ...], CommandResult]:
     context = ("docker", "context", "show")
     version = ("docker", "version", "--format", "{{json .}}")
@@ -56,16 +61,23 @@ def docker_results(
             ),
         ),
         info: command_result(
-            info,
-            stdout=json.dumps(
-                {
-                    "OSType": "linux",
-                    "Architecture": architecture,
-                    "Runtimes": {runtime: {} for runtime in runtimes},
-                }
-            ),
+            info, stdout=json.dumps(_docker_info(architecture, runtimes, info_overrides))
         ),
     }
+
+
+def _docker_info(
+    architecture: str,
+    runtimes: tuple[str, ...],
+    overrides: Mapping[str, object] | None,
+) -> dict[str, object]:
+    info: dict[str, object] = {
+        "OSType": "linux",
+        "Architecture": architecture,
+        "Runtimes": {runtime: {} for runtime in runtimes},
+    }
+    info.update(overrides or {})
+    return info
 
 
 def gpu_command() -> tuple[str, ...]:
@@ -91,12 +103,23 @@ def test_doctor_passes_supported_linux_host(monkeypatch: object) -> None:
     assert result.outcome == "supported"
     assert doctor_exit_code(result) == 0
     assert result.gpus[0].compute_capability == "8.9"
+    assert result.docker.cdi_spec_dirs == ()
+    assert result.docker.discovered_devices == ()
 
 
 def test_doctor_allows_cdi_only_host_for_exact_worker_probe(monkeypatch: object) -> None:
     monkeypatch.setattr("platform.system", lambda: "Linux")  # type: ignore[attr-defined]
     monkeypatch.setattr("platform.machine", lambda: "x86_64")  # type: ignore[attr-defined]
-    results = docker_results(runtimes=("io.containerd.runc.v2", "runc"))
+    results = docker_results(
+        runtimes=("io.containerd.runc.v2", "runc"),
+        info_overrides={
+            "CDISpecDirs": ["/etc/cdi", "/var/run/cdi"],
+            "DiscoveredDevices": [
+                {"Source": "cdi", "ID": "nvidia.com/gpu=GPU-b"},
+                {"Source": "cdi", "ID": "nvidia.com/gpu=GPU-a"},
+            ],
+        },
+    )
     results[gpu_command()] = command_result(
         gpu_command(),
         stdout=(
@@ -106,6 +129,42 @@ def test_doctor_allows_cdi_only_host_for_exact_worker_probe(monkeypatch: object)
     result = run_doctor(FakeRunner(results))
     assert result.outcome == "supported"
     assert not result.issues
+    assert result.docker.runtimes == ("io.containerd.runc.v2", "runc")
+    assert result.docker.cdi_spec_dirs == ("/etc/cdi", "/var/run/cdi")
+    assert [device.id for device in result.docker.discovered_devices] == [
+        "nvidia.com/gpu=GPU-a",
+        "nvidia.com/gpu=GPU-b",
+    ]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"CDISpecDirs": "/etc/cdi"},
+        {"CDISpecDirs": ["/etc/cdi", 7]},
+        {"CDISpecDirs": [" "]},
+        {"DiscoveredDevices": {"Source": "cdi", "ID": "nvidia.com/gpu=all"}},
+        {"DiscoveredDevices": [{}]},
+        {"DiscoveredDevices": [{"Source": "cdi", "ID": 7}]},
+    ],
+)
+def test_doctor_rejects_malformed_docker_device_inventory(
+    monkeypatch: object,
+    overrides: Mapping[str, object],
+) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")  # type: ignore[attr-defined]
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")  # type: ignore[attr-defined]
+    results = docker_results(info_overrides=overrides)
+    results[gpu_command()] = command_result(
+        gpu_command(),
+        stdout=(
+            "NVIDIA RTX Test, GPU-11111111-1111-1111-1111-111111111111, 8.9, 24576, 580.80.01\n"
+        ),
+    )
+    result = run_doctor(FakeRunner(results))
+    assert result.outcome == "infrastructure_invalid"
+    assert not result.docker.available
+    assert {issue.code for issue in result.issues} == {"DOCKER_PROBE_INVALID"}
 
 
 def test_doctor_fails_closed_on_macos_arm64(monkeypatch: object) -> None:

@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import AwareDatetime, Field, StringConstraints, model_validator
 
 from upgrade_guard.contracts.base import StrictModel, model_sha256
+from upgrade_guard.contracts.doctor import DockerDiscoveredDevice, NonemptyDockerValue
 from upgrade_guard.contracts.matrix import EnvironmentId, GpuUuid
 
 Sha256Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -144,6 +145,8 @@ class HostObservation(StrictModel):
     docker_client_version: str
     docker_server_version: str
     docker_runtime_inventory: tuple[str, ...]
+    docker_cdi_spec_dirs: tuple[NonemptyDockerValue, ...]
+    docker_discovered_devices: tuple[DockerDiscoveredDevice, ...]
     gpu_injection_interface: Literal["docker-gpus"]
     gpu_injection_verified: Literal[True]
     nvidia_container_toolkit_version: NvidiaContainerToolkitVersionObservation

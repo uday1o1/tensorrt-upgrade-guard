@@ -8,7 +8,13 @@ import sys
 from typing import Any, Literal
 
 from upgrade_guard.containers.commands import CommandResult, CommandRunner, Runner
-from upgrade_guard.contracts.doctor import DoctorDocker, DoctorGpu, DoctorIssue, DoctorResult
+from upgrade_guard.contracts.doctor import (
+    DockerDiscoveredDevice,
+    DoctorDocker,
+    DoctorGpu,
+    DoctorIssue,
+    DoctorResult,
+)
 from upgrade_guard.errors import InfrastructureError
 
 
@@ -122,6 +128,8 @@ def _probe_docker(runner: Runner) -> tuple[DoctorDocker, list[DoctorIssue]]:
         server_version = _nested_string(version, "Server", "Version")
         runtimes_value = info.get("Runtimes", {})
         runtimes = tuple(sorted(runtimes_value)) if isinstance(runtimes_value, dict) else ()
+        cdi_spec_dirs = _docker_string_inventory(info, "CDISpecDirs")
+        discovered_devices = _docker_discovered_devices(info)
         return (
             DoctorDocker(
                 available=True,
@@ -130,6 +138,8 @@ def _probe_docker(runner: Runner) -> tuple[DoctorDocker, list[DoctorIssue]]:
                 server_os=_optional_string(info.get("OSType")),
                 server_architecture=_optional_string(info.get("Architecture")),
                 runtimes=runtimes,
+                cdi_spec_dirs=cdi_spec_dirs,
+                discovered_devices=discovered_devices,
                 context=context_result.stdout.strip() if context_result.returncode == 0 else None,
             ),
             issues,
@@ -229,6 +239,43 @@ def _nested_string(value: dict[str, Any], *keys: str) -> str:
 
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _docker_string_inventory(info: dict[str, Any], key: str) -> tuple[str, ...]:
+    """Return an optional Docker string inventory without guessing malformed values."""
+
+    if key not in info:
+        return ()
+    value = info[key]
+    if not isinstance(value, list):
+        raise TypeError(f"{key} is not an array")
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        raise TypeError(f"{key} contains a nonempty-string violation")
+    return tuple(value)
+
+
+def _docker_discovered_devices(
+    info: dict[str, Any],
+) -> tuple[DockerDiscoveredDevice, ...]:
+    """Normalize Docker's optional device inventory into a deterministic typed tuple."""
+
+    if "DiscoveredDevices" not in info:
+        return ()
+    value = info["DiscoveredDevices"]
+    if not isinstance(value, list):
+        raise TypeError("DiscoveredDevices is not an array")
+    devices: list[DockerDiscoveredDevice] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise TypeError(f"DiscoveredDevices[{index}] is not an object")
+        source = item.get("Source")
+        identifier = item.get("ID")
+        if not isinstance(source, str) or not source:
+            raise TypeError(f"DiscoveredDevices[{index}].Source is not a nonempty string")
+        if not isinstance(identifier, str) or not identifier:
+            raise TypeError(f"DiscoveredDevices[{index}].ID is not a nonempty string")
+        devices.append(DockerDiscoveredDevice(source=source, id=identifier))
+    return tuple(sorted(devices, key=lambda device: (device.source, device.id)))
 
 
 def doctor_exit_code(result: DoctorResult) -> int:

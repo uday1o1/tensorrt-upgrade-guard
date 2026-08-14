@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from upgrade_guard.contracts.common import FailureRecord, Phase, ResultStatus
 from upgrade_guard.contracts.doctor import (
+    DockerDiscoveredDevice,
     DoctorDocker,
     DoctorGpu,
     DoctorResult,
@@ -136,6 +137,10 @@ def supported_doctor(
             server_os="linux",
             server_architecture="x86_64",
             runtimes=("nvidia", "runc"),
+            cdi_spec_dirs=("/etc/cdi", "/var/run/cdi"),
+            discovered_devices=(
+                DockerDiscoveredDevice(source="cdi", id=f"nvidia.com/gpu={gpu_uuid}"),
+            ),
             context="default",
         ),
         gpus=(
@@ -182,6 +187,10 @@ def environment_lock(
             docker_client_version="29.0.0",
             docker_server_version="29.0.0",
             docker_runtime_inventory=("nvidia", "runc"),
+            docker_cdi_spec_dirs=("/etc/cdi", "/var/run/cdi"),
+            docker_discovered_devices=(
+                DockerDiscoveredDevice(source="cdi", id=f"nvidia.com/gpu={gpu_uuid}"),
+            ),
             gpu_injection_interface="docker-gpus",
             gpu_injection_verified=True,
             nvidia_container_toolkit_version=NvidiaContainerToolkitVersionObservation(

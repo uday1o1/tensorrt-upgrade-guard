@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
 from upgrade_guard.containers.commands import CommandResult
+from upgrade_guard.containers.gpu_runtime import observe_nvidia_container_toolkit_version
 from upgrade_guard.containers.runtime import DockerGpuWorker, WorkerMounts
 from upgrade_guard.containers.security import validate_locked_image, validated_mount
-from upgrade_guard.errors import InfrastructureError, InvalidInputError
+from upgrade_guard.errors import InfrastructureError, InvalidInputError, UnsupportedEnvironmentError
 
 
 class CapturingRunner:
@@ -164,3 +166,58 @@ def test_worker_timeout_cleans_only_its_unique_container(tmp_path: Path) -> None
     name = run_command[run_command.index("--name") + 1]
     assert cleanup == ("docker", "container", "rm", "--force", name)
     assert name.startswith("upgrade-guard-worker-")
+
+
+def test_gpu_worker_classifies_target_cdi_failure_and_cleans_up(tmp_path: Path) -> None:
+    directory = tmp_path / "deep" / "directory"
+    directory.mkdir(parents=True)
+
+    class CdiFailureRunner:
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, ...]] = []
+
+        def run(self, args: tuple[str, ...], **kwargs: object) -> CommandResult:
+            del kwargs
+            command = tuple(args)
+            self.commands.append(command)
+            if command[:2] == ("docker", "run"):
+                return CommandResult(
+                    command,
+                    1,
+                    "",
+                    (
+                        "docker: Error response from daemon: failed to discover GPU vendor "
+                        "from CDI: no known GPU vendor found"
+                    ),
+                    0.1,
+                )
+            return CommandResult(command, 0, "", "", 0.1)
+
+    class UnavailableToolkitRunner:
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            timeout_seconds: float = 30.0,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del timeout_seconds, cwd, env
+            return CommandResult(tuple(args), 127, "", "command not found", 0.01)
+
+    observation = observe_nvidia_container_toolkit_version(UnavailableToolkitRunner())
+    runner = CdiFailureRunner()
+    worker = DockerGpuWorker(runner)
+    with pytest.raises(UnsupportedEnvironmentError) as captured:
+        worker.run(
+            image="registry.example/image@sha256:" + "1" * 64,
+            gpu_uuid="GPU-11111111-1111-1111-1111-111111111111",
+            mounts=WorkerMounts(directory, directory, directory / "output"),
+            command=("true",),
+            timeout_seconds=1,
+            toolkit_observation=observation,
+        )
+    assert captured.value.details["diagnosis_code"] == "NVIDIA_CONTAINER_TOOLKIT_UNAVAILABLE"
+    run_command, cleanup = runner.commands
+    name = run_command[run_command.index("--name") + 1]
+    assert cleanup == ("docker", "container", "rm", "--force", name)

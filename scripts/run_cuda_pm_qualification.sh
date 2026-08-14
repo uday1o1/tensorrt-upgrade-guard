@@ -190,6 +190,12 @@ cpu_verify() {
   [[ -z "$(git status --porcelain --untracked-files=normal)" ]]
 }
 
+gpu_runtime_preflight() {
+  "${UV[@]}" run --frozen python scripts/check_docker_gpu_runtime.py \
+    --gpu "${GPU_UUID}" --image "${REGISTRY_IMAGE}" \
+    --output "${STATE_ROOT}/gpu-runtime-preflight.json"
+}
+
 start_local_registry() {
   docker pull "${REGISTRY_IMAGE}"
   mapfile -t port_owners < <(docker container ls --filter publish=5500 --format '{{.Names}}')
@@ -1181,6 +1187,9 @@ select_uv
 invocation_guard
 run_step preflight preflight
 run_step cpu-verify cpu_verify
+run_always_step gpu-runtime-preflight gpu_runtime_preflight
+CURRENT_STEP=reconcile
+reconcile_state
 run_always_step registry-bootstrap start_local_registry
 run_step capacity-preflight capacity_preflight
 run_step worker-images build_workers
@@ -1192,8 +1201,6 @@ if [[ "${SANITIZER_ONLY}" == "1" ]]; then
 else
   run_step corpus-materialization materialize_corpora
 fi
-CURRENT_STEP=reconcile
-reconcile_state
 if [[ "${SMOKE_ONLY}" == "1" ]]; then
   run_step plugin-compile-test compile_plugins
   run_step gpu-smoke run_gpu_smoke

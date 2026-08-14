@@ -260,13 +260,45 @@ def test_matrix_and_corpus_bindings_are_copied_into_markers(tmp_path: Path) -> N
 
 def test_matrix_self_hash_must_validate_before_record(tmp_path: Path) -> None:
     state, project = _roots(tmp_path)
-    _record_closure(state, project, {"worker-images"})
+    _record_closure(state, project, {"worker-images", "gpu-runtime-preflight"})
     _prepare_step(state, "matrix-lock")
     value = json.loads((state / "matrix.lock.json").read_text(encoding="utf-8"))
     value["lock_sha256"] = digest("f")
     _write_json(state / "matrix.lock.json", value)
     with pytest.raises(ValueError, match="self-hash"):
         qualification_state.record_marker(state, project, "matrix-lock", SOURCE, GPU, "full")
+
+
+def test_runtime_fingerprint_change_invalidates_matrix_but_not_worker_images(
+    tmp_path: Path,
+) -> None:
+    state, project = _roots(tmp_path)
+    _record_closure(state, project, {"matrix-lock"})
+    runtime = state / "gpu-runtime-preflight.json"
+    _write_json(runtime, {"status": "passed", "fingerprint": digest("d")})
+    qualification_state.record_marker(
+        state,
+        project,
+        "gpu-runtime-preflight",
+        SOURCE,
+        GPU,
+        "full",
+    )
+
+    assert qualification_state.verify_marker(state, project, "worker-images", SOURCE, GPU, "full")
+    assert not qualification_state.verify_marker(state, project, "matrix-lock", SOURCE, GPU, "full")
+    result = qualification_state.reconcile(
+        state,
+        project,
+        source=SOURCE,
+        gpu=GPU,
+        mode="full",
+        now=FIXED_RECONCILE_TIME,
+    )
+    assert "matrix-lock" in result["invalid_steps"]
+    assert "worker-images" in result["valid_steps"]
+    assert not (state / "matrix.lock.json").exists()
+    assert (state / "worker-images.json").exists()
 
 
 def test_current_step_aliases_share_canonical_authority_and_marker(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 import upgrade_guard.matrix.lock as lock_module
 from tests.factories import FIXED_TIME, digest, resolved_image, supported_doctor, worker_probe
 from upgrade_guard.containers.commands import CommandResult
+from upgrade_guard.containers.gpu_runtime import observe_nvidia_container_toolkit_version
 from upgrade_guard.contracts.base import sha256_bytes
 from upgrade_guard.contracts.doctor import DoctorIssue
 from upgrade_guard.contracts.environment import NvidiaContainerToolkitVersionObservation
@@ -27,7 +28,6 @@ from upgrade_guard.matrix.lock import (
     MatrixLocker,
     _host_inventory,
     _host_observation,
-    _nvidia_container_toolkit_version,
     _parse_matrix,
     _read_matrix,
     _validate_pair,
@@ -68,20 +68,38 @@ class FakeProber:
     def __init__(self, probes: Mapping[str, ProbeExecution]) -> None:
         self.probes = probes
         self.images: list[str] = []
+        self.toolkit_observations: list[NvidiaContainerToolkitVersionObservation] = []
 
-    def run(self, image: object, gpu_uuid: str) -> ProbeExecution:
+    def run(
+        self,
+        image: object,
+        gpu_uuid: str,
+        *,
+        toolkit_observation: NvidiaContainerToolkitVersionObservation,
+    ) -> ProbeExecution:
         manifest_digest = image.manifest_digest  # type: ignore[attr-defined]
         self.images.append(manifest_digest)
+        self.toolkit_observations.append(toolkit_observation)
         assert gpu_uuid == GPU_UUID
         return self.probes[manifest_digest]
 
 
 class FailSecondProber(FakeProber):
-    def run(self, image: object, gpu_uuid: str) -> ProbeExecution:
+    def run(
+        self,
+        image: object,
+        gpu_uuid: str,
+        *,
+        toolkit_observation: NvidiaContainerToolkitVersionObservation,
+    ) -> ProbeExecution:
         if len(self.images) == 1:
             self.images.append(image.manifest_digest)  # type: ignore[attr-defined]
             raise InfrastructureError("second exact worker could not launch")
-        return super().run(image, gpu_uuid)
+        return super().run(
+            image,
+            gpu_uuid,
+            toolkit_observation=toolkit_observation,
+        )
 
 
 def matrix_spec() -> MatrixSpec:
@@ -166,7 +184,15 @@ def locker() -> MatrixLocker:
 
 
 def test_build_lock_captures_exact_pair_and_self_hash() -> None:
-    result = locker().build(matrix_spec(), source_sha256=digest("9"))
+    resolver, prober = lock_dependencies()
+    subject = MatrixLocker(
+        runner=ToolkitRunner(),
+        resolver=resolver,
+        prober=prober,
+        doctor=supported_doctor,
+        clock=lambda: FIXED_TIME,
+    )
+    result = subject.build(matrix_spec(), source_sha256=digest("9"))
     assert [environment.id for environment in result.environments] == [
         "baseline",
         "candidate",
@@ -177,6 +203,14 @@ def test_build_lock_captures_exact_pair_and_self_hash() -> None:
     assert result.environments[0].base_image.manifest_digest != (
         result.environments[0].worker_image.manifest_digest
     )
+    assert len(prober.toolkit_observations) == 2
+    assert all(observation.status == "observed" for observation in prober.toolkit_observations)
+    host = result.environments[0].host
+    assert host.docker_cdi_spec_dirs == ("/etc/cdi", "/var/run/cdi")
+    assert [device.id for device in host.docker_discovered_devices] == [
+        f"nvidia.com/gpu={GPU_UUID}"
+    ]
+    assert result.environments[1].host == host
 
 
 def test_lock_writes_only_complete_valid_json(tmp_path: Path) -> None:
@@ -427,10 +461,14 @@ def test_host_observation_falls_back_to_nvidia_ctk() -> None:
     )
     inventory = _host_inventory(doctor, FallbackToolkitRunner(succeeds=True))
     assert inventory.docker_runtime_inventory == ("runc",)
+    assert inventory.docker_cdi_spec_dirs == ("/etc/cdi", "/var/run/cdi")
+    assert [device.source for device in inventory.docker_discovered_devices] == ["cdi"]
     assert inventory.toolkit_version.status == "observed"
     assert inventory.toolkit_version.source == "nvidia-ctk"
     observation = _host_observation(inventory)
     assert observation.docker_runtime_inventory == ("runc",)
+    assert observation.docker_cdi_spec_dirs == ("/etc/cdi", "/var/run/cdi")
+    assert observation.docker_discovered_devices == inventory.docker_discovered_devices
     assert observation.gpu_injection_verified is True
 
 
@@ -493,14 +531,14 @@ def test_host_inventory_keeps_unavailable_toolkit_version_truthfully() -> None:
 def test_toolkit_version_uses_runtime_and_package_metadata_fallbacks(
     command: tuple[str, ...], output: str
 ) -> None:
-    observation = _nvidia_container_toolkit_version(ExactToolkitRunner(command, output))
+    observation = observe_nvidia_container_toolkit_version(ExactToolkitRunner(command, output))
     assert observation.status == "observed"
     assert observation.version == output.strip()
     assert observation.attempts[-1].outcome == "observed"
 
 
 def test_toolkit_observation_rejects_inconsistent_states() -> None:
-    attempt = _nvidia_container_toolkit_version(ToolkitRunner()).attempts[0]
+    attempt = observe_nvidia_container_toolkit_version(ToolkitRunner()).attempts[0]
     with pytest.raises(ValidationError, match="require a version and source"):
         NvidiaContainerToolkitVersionObservation(
             status="observed",

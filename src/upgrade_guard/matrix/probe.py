@@ -12,8 +12,16 @@ from typing import Any
 from pydantic import ValidationError
 
 from upgrade_guard.containers.commands import CommandRunner, Runner, command_sha256
+from upgrade_guard.containers.gpu_runtime import (
+    bounded_redacted_output,
+    docker_gpu_failure_error,
+)
 from upgrade_guard.contracts.base import sha256_bytes
-from upgrade_guard.contracts.environment import ResolvedImage, WorkerProbe
+from upgrade_guard.contracts.environment import (
+    NvidiaContainerToolkitVersionObservation,
+    ResolvedImage,
+    WorkerProbe,
+)
 from upgrade_guard.errors import InfrastructureError, InvalidInputError
 
 
@@ -33,7 +41,13 @@ class DockerWorkerProbe:
         self.runner = runner or CommandRunner()
         self.script_path = script_path or Path(__file__).with_name("worker_probe.py")
 
-    def run(self, image: ResolvedImage, gpu_uuid: str) -> ProbeExecution:
+    def run(
+        self,
+        image: ResolvedImage,
+        gpu_uuid: str,
+        *,
+        toolkit_observation: NvidiaContainerToolkitVersionObservation | None = None,
+    ) -> ProbeExecution:
         """Run a network-isolated read-only probe by immutable manifest digest."""
 
         canonical = image.canonical_reference
@@ -101,12 +115,14 @@ class DockerWorkerProbe:
         try:
             result = self.runner.run(command, timeout_seconds=300)
             if result.returncode != 0:
-                raise InfrastructureError(
+                raise docker_gpu_failure_error(
                     "worker probe container failed",
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    toolkit_observation=toolkit_observation,
                     details={
                         "image": canonical,
                         "command_sha256": command_sha256(command),
-                        "error": _bounded(result.stderr, result.stdout),
                     },
                 )
             payload: Any = json.loads(result.stdout)
@@ -168,4 +184,4 @@ class DockerWorkerProbe:
 
 
 def _bounded(*values: str) -> str:
-    return "\n".join(value.strip() for value in values if value.strip())[:1000]
+    return bounded_redacted_output(*values, limit=1000)

@@ -12,6 +12,7 @@ import numpy as np
 from tests.factories import digest, resolved_image, worker_probe
 from upgrade_guard.containers.commands import CommandResult
 from upgrade_guard.contracts.base import sha256_file
+from upgrade_guard.contracts.doctor import DockerDiscoveredDevice
 from upgrade_guard.contracts.environment import (
     CompatibilityEvidence,
     EnvironmentLock,
@@ -189,6 +190,10 @@ def _environment(identifier: str, image_character: str) -> EnvironmentLock:
             docker_client_version="29.0.0",
             docker_server_version="29.0.0",
             docker_runtime_inventory=("nvidia", "runc"),
+            docker_cdi_spec_dirs=("/etc/cdi", "/var/run/cdi"),
+            docker_discovered_devices=(
+                DockerDiscoveredDevice(source="cdi", id=f"nvidia.com/gpu={GPU_UUID}"),
+            ),
             gpu_injection_interface="docker-gpus",
             gpu_injection_verified=True,
             nvidia_container_toolkit_version=NvidiaContainerToolkitVersionObservation(

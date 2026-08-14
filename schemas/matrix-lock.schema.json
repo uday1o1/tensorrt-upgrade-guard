@@ -53,6 +53,28 @@
       "title": "CompatibilityEvidence",
       "type": "object"
     },
+    "DockerDiscoveredDevice": {
+      "additionalProperties": false,
+      "description": "One normalized device reported by Docker's discovery inventory.",
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "id"
+      ],
+      "title": "DockerDiscoveredDevice",
+      "type": "object"
+    },
     "EnvironmentLock": {
       "additionalProperties": false,
       "description": "Complete immutable identity and observations for one worker.",
@@ -184,9 +206,24 @@
           "title": "Architecture",
           "type": "string"
         },
+        "docker_cdi_spec_dirs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Docker Cdi Spec Dirs",
+          "type": "array"
+        },
         "docker_client_version": {
           "title": "Docker Client Version",
           "type": "string"
+        },
+        "docker_discovered_devices": {
+          "items": {
+            "$ref": "#/$defs/DockerDiscoveredDevice"
+          },
+          "title": "Docker Discovered Devices",
+          "type": "array"
         },
         "docker_runtime_inventory": {
           "items": {
@@ -228,6 +265,8 @@
         "docker_client_version",
         "docker_server_version",
         "docker_runtime_inventory",
+        "docker_cdi_spec_dirs",
+        "docker_discovered_devices",
         "gpu_injection_interface",
         "gpu_injection_verified",
         "nvidia_container_toolkit_version"

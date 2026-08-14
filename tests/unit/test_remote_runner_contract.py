@@ -10,6 +10,7 @@ RUNNER = Path("scripts/run_cuda_pm_qualification.sh")
 def test_full_runner_orders_early_and_candidate_gates_fail_closed() -> None:
     text = RUNNER.read_text(encoding="utf-8")
     ordered = (
+        "run_always_step gpu-runtime-preflight",
         "run_always_step registry-bootstrap",
         "run_step capacity-preflight",
         "run_step worker-images",
@@ -45,6 +46,8 @@ def test_runner_has_single_process_lock_live_gpu_probe_and_exact_seed_schedule()
     text = RUNNER.read_text(encoding="utf-8")
     assert '"${LOCK_ROOT}/runner.lock"' in text
     assert 'nvidia-smi --id="${UG_EXPECTED_GPU_UUID}"' in text
+    assert "scripts/check_docker_gpu_runtime.py" in text
+    assert text.index("CURRENT_STEP=reconcile") < text.rindex("run_always_step registry-bootstrap")
     assert "NSIGHT_COMPUTE_COUNTER_PERMISSION_UNAVAILABLE" in text
     assert "ERR_NVGPUCTRPERM" in text
     assert '--pair-index "${accepted}"' in text

@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from tests.factories import available_tool
 from upgrade_guard.contracts.base import canonical_json_bytes, model_sha256
+from upgrade_guard.contracts.doctor import DockerDiscoveredDevice
 from upgrade_guard.contracts.environment import ToolObservation
 from upgrade_guard.contracts.matrix import MatrixSpec
 
@@ -74,6 +75,15 @@ def test_tool_observation_fails_closed() -> None:
         ToolObservation(available=True)
     with pytest.raises(ValidationError, match="cannot contain"):
         ToolObservation(available=False, path="/bin/tool")
+
+
+def test_docker_discovered_device_is_strict_and_nonempty() -> None:
+    with pytest.raises(ValidationError, match="extra"):
+        DockerDiscoveredDevice.model_validate(
+            {"source": "cdi", "id": "nvidia.com/gpu=all", "extra": True}
+        )
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        DockerDiscoveredDevice(source="cdi", id="")
 
 
 def test_canonical_json_and_model_hash_are_stable() -> None:
