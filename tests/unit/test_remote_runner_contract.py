@@ -11,11 +11,12 @@ def test_full_runner_orders_early_and_candidate_gates_fail_closed() -> None:
     text = RUNNER.read_text(encoding="utf-8")
     ordered = (
         "run_always_step gpu-runtime-preflight",
+        "run_step dependency-audit",
         "run_always_step registry-bootstrap",
         "run_step capacity-preflight",
+        "run_step corpus-materialization",
         "run_step worker-images",
         "run_step matrix-lock",
-        "run_step corpus-materialization",
         "run_step plugin-compile-test",
         "run_step profiler-preflight",
         "run_step aa-pilot",
@@ -53,3 +54,64 @@ def test_runner_has_single_process_lock_live_gpu_probe_and_exact_seed_schedule()
     assert '--pair-index "${accepted}"' in text
     assert '--entrypoint ""' in text
     assert "--step terminal-cleanup" in text
+
+
+def test_runner_bounds_gpu_work_and_cleans_only_its_exact_container() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    gpu_run = text[text.index("gpu_run() {") : text.index("run_core_qualification() {")]
+    assert 'bounded_run gpu docker run --rm --name "${container_name}"' in gpu_run
+    assert 'bounded_run cleanup docker container rm --force "${container_name}"' in gpu_run
+    assert "if docker run" not in gpu_run
+    assert "docker container prune" not in text
+    assert "docker system prune" not in text
+
+
+def test_runner_bounds_docker_network_and_dependency_commands() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    assert 'source "${PROJECT_ROOT}/scripts/bounded_executor.sh"' in text
+    assert "initialize_bounded_executor" in text
+    assert "bounded_run build docker build" in text
+    assert "bounded_run network docker push" in text
+    assert "bounded_run quick docker container start" in text
+    assert "bounded_run quick docker exec" in text
+    assert "--connect-timeout 3 --max-time 5" in text
+    assert "bounded_run preflight nvidia-smi" in text
+    assert 'bounded_run network "${bootstrap}/bin/python" -m pip install' in text
+    assert "tool run --from pip-audit" not in text
+    assert 'bounded_run audit "${UV[@]}" run --frozen pip-audit' in text
+    assert text.rindex("run_step dependency-audit") < text.rindex("run_step worker-images")
+    assert 'if [[ "${RUN_MODE}" == "full" ]]; then\n  run_step dependency-audit' in text
+
+
+def test_runner_reuses_pinned_registry_image_and_captures_filesystem_id() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    registry = text[text.index("start_local_registry() {") : text.index("capacity_preflight() {")]
+    assert 'ensure_exact_docker_image "${REGISTRY_IMAGE}"' in registry
+    assert 'docker pull "${REGISTRY_IMAGE}"' not in registry
+    capacity = text[text.index("capacity_preflight() {") : text.index("build_workers() {")]
+    assert "stat -c %d /var/lib/registry" in capacity
+    assert '--docker-filesystem-id "${docker_filesystem_id}"' in capacity
+
+
+def test_runner_uses_bounded_preflight_and_evidence_timeouts() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    assert (
+        'bounded_run preflight "${UV[@]}" run --frozen python scripts/check_docker_gpu_runtime.py'
+        in text
+    )
+    assert (
+        'bounded_run evidence "${UV[@]}" run --frozen python scripts/generate_remote_evidence.py'
+        in text
+    )
+    assert "bounded_run quick python3 scripts/check_capacity.py" in text
+
+
+def test_bounded_modes_do_not_materialize_mobilenet_or_run_dependency_audit() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    assert "materialize_bounded_corpora()" in text
+    assert 'if [[ "${RUN_MODE}" == "full" ]]; then\n    MOBILENET_CORPUS=' in text
+    materialization = (
+        'if [[ "${RUN_MODE}" == "full" ]]; then\n'
+        "  run_step corpus-materialization materialize_corpora"
+    )
+    assert materialization in text

@@ -235,9 +235,9 @@ def test_dependency_marker_byte_drift_invalidates_only_descendants(tmp_path: Pat
     )
 
 
-def test_matrix_and_corpus_bindings_are_copied_into_markers(tmp_path: Path) -> None:
+def test_matrix_and_corpus_bindings_remain_independent_before_gpu_work(tmp_path: Path) -> None:
     state, project = _roots(tmp_path)
-    _record_closure(state, project, {"corpus-materialization"})
+    _record_closure(state, project, {"matrix-lock", "corpus-materialization"})
     matrix = json.loads((state / "done" / "matrix-lock.json").read_text(encoding="utf-8"))
     corpus = json.loads(
         (state / "done" / "corpus-materialization.json").read_text(encoding="utf-8")
@@ -245,7 +245,7 @@ def test_matrix_and_corpus_bindings_are_copied_into_markers(tmp_path: Path) -> N
     lock = MatrixLock.model_validate_json((state / "matrix.lock.json").read_text())
     assert matrix["matrix_lock_sha256"] == lock.lock_sha256
     assert matrix["corpus_identities"] == []
-    assert corpus["matrix_lock_sha256"] == lock.lock_sha256
+    assert corpus["matrix_lock_sha256"] is None
     assert [item["kind"] for item in corpus["corpus_identities"]] == [
         "core",
         "mobilenet",
@@ -303,7 +303,7 @@ def test_runtime_fingerprint_change_invalidates_matrix_but_not_worker_images(
 
 def test_current_step_aliases_share_canonical_authority_and_marker(tmp_path: Path) -> None:
     state, project = _roots(tmp_path)
-    _record_closure(state, project, {"corpus-materialization"})
+    _record_closure(state, project, {"matrix-lock", "corpus-materialization"})
     _prepare_step(state, "plugin-build", invoked_step="plugin-compile-test")
     payload = qualification_state.record_marker(
         state, project, "plugin-compile-test", SOURCE, GPU, "full"
@@ -347,7 +347,10 @@ def test_final_dependencies_are_exact_mode_specific_pre_final_set() -> None:
         "terminal-cleanup",
     }
     assert "gpu-smoke" not in full
+    assert "dependency-audit" in full
     assert "final-evidence" not in qualification_state.MODE_STEPS["smoke"]
+    assert "dependency-audit" not in qualification_state.MODE_STEPS["smoke"]
+    assert "dependency-audit" not in qualification_state.MODE_STEPS["sanitizer"]
     assert "profiles" not in qualification_state.MODE_STEPS["sanitizer"]
 
 

@@ -25,6 +25,7 @@ upgrade-guard = "upgrade_guard.cli:app"
 [dependency-groups]
 dev = [
   "mypy==1.17.1",
+  "pip-audit==2.10.1",
   "pytest==8.4.1",
   "pytest-cov==6.2.1",
   "ruff==0.12.8",

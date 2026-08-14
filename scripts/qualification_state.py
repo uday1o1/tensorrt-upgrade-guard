@@ -65,9 +65,17 @@ STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "gpu-runtime-preflight": ("cpu-verify",),
     "registry-bootstrap": ("cpu-verify",),
     "capacity-preflight": ("preflight", "registry-bootstrap"),
-    "worker-images": ("cpu-verify", "registry-bootstrap", "capacity-preflight"),
+    "dependency-audit": ("cpu-verify",),
+    "corpus-materialization": (
+        "gpu-runtime-preflight",
+        "capacity-preflight",
+    ),
+    "worker-images": (
+        "cpu-verify",
+        "registry-bootstrap",
+        "capacity-preflight",
+    ),
     "matrix-lock": ("worker-images", "gpu-runtime-preflight"),
-    "corpus-materialization": ("matrix-lock",),
     "plugin-build": ("matrix-lock", "corpus-materialization"),
     "profiler-preflight": ("plugin-build",),
     "aa-pilot": ("matrix-lock", "corpus-materialization", "profiler-preflight"),
@@ -109,7 +117,6 @@ STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "matrix-lock",
     ),
     "sboms": ("worker-images", "matrix-lock"),
-    "dependency-audit": ("worker-images", "cpu-verify"),
     "final-evidence": (),
     "terminal-cleanup": ("final-evidence",),
 }
@@ -119,11 +126,12 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
         "preflight",
         "cpu-verify",
         "gpu-runtime-preflight",
+        "dependency-audit",
         "registry-bootstrap",
         "capacity-preflight",
+        "corpus-materialization",
         "worker-images",
         "matrix-lock",
-        "corpus-materialization",
         "plugin-build",
         "profiler-preflight",
         "aa-pilot",
@@ -141,7 +149,6 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
         "sanitizers",
         "profiles",
         "sboms",
-        "dependency-audit",
         "final-evidence",
         "terminal-cleanup",
     ),
@@ -151,9 +158,9 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
         "gpu-runtime-preflight",
         "registry-bootstrap",
         "capacity-preflight",
+        "corpus-materialization",
         "worker-images",
         "matrix-lock",
-        "corpus-materialization",
         "plugin-build",
         "gpu-smoke",
     ),
@@ -163,9 +170,9 @@ MODE_STEPS: dict[str, tuple[str, ...]] = {
         "gpu-runtime-preflight",
         "registry-bootstrap",
         "capacity-preflight",
+        "corpus-materialization",
         "worker-images",
         "matrix-lock",
-        "corpus-materialization",
         "plugin-build",
         "sanitizers",
     ),
@@ -595,7 +602,9 @@ def _corpus_identities(
     corpora = value.get("corpora")
     if not isinstance(corpora, dict) or not corpora:
         raise ValueError("corpora.json must contain a nonempty corpora mapping")
-    expected_kinds = {"core", "plugin"} if mode == "sanitizer" else {"core", "plugin", "mobilenet"}
+    expected_kinds = (
+        {"core", "plugin"} if mode in {"smoke", "sanitizer"} else {"core", "plugin", "mobilenet"}
+    )
     if set(corpora) != expected_kinds:
         raise ValueError(f"corpora.json kinds differ for {mode} mode")
 

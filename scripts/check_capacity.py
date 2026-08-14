@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-SCHEMA_VERSION = "upgradeguard.dev/capacity-check/v1"
+SCHEMA_VERSION = "upgradeguard.dev/capacity-check/v2"
 INFRASTRUCTURE_EXIT = 4
 INVALID_INPUT_EXIT = 2
 DEFAULT_WORKSPACE_BYTES = 20 * 1024**3
@@ -22,11 +22,30 @@ DEFAULT_FREE_INODES = 100_000
 
 
 @dataclass(frozen=True)
+class FilesystemIdentity:
+    kind: Literal["device_number"]
+    value: str
+
+
+@dataclass(frozen=True)
 class CapacityObservation:
+    filesystem_identity: FilesystemIdentity
     available_bytes: int
     available_inodes: int
     required_bytes: int
     required_inodes: int
+    sufficient: bool
+
+
+@dataclass(frozen=True)
+class FilesystemCapacityDecision:
+    mode: Literal["shared", "independent"]
+    workspace_identity: FilesystemIdentity
+    docker_volume_identity: FilesystemIdentity
+    available_bytes: int | None
+    available_inodes: int | None
+    required_bytes: int | None
+    required_inodes: int | None
     sufficient: bool
 
 
@@ -51,7 +70,9 @@ def workspace_capacity(
     available_inodes = int(values.f_favail)
     if available_bytes < 0 or available_inodes < 0:
         raise RuntimeError("workspace capacity observation is unavailable")
+    identity = _filesystem_identity(str(resolved.stat().st_dev))
     return CapacityObservation(
+        filesystem_identity=identity,
         available_bytes=available_bytes,
         available_inodes=available_inodes,
         required_bytes=required_bytes,
@@ -86,18 +107,62 @@ def parse_posix_df(text: str, *, kind: Literal["bytes", "inodes"]) -> int:
 def docker_capacity(
     blocks_text: str,
     inodes_text: str,
+    filesystem_identity: FilesystemIdentity,
     required_bytes: int,
     required_inodes: int,
 ) -> CapacityObservation:
     available_bytes = parse_posix_df(blocks_text, kind="bytes")
     available_inodes = parse_posix_df(inodes_text, kind="inodes")
     return CapacityObservation(
+        filesystem_identity=filesystem_identity,
         available_bytes=available_bytes,
         available_inodes=available_inodes,
         required_bytes=required_bytes,
         required_inodes=required_inodes,
         sufficient=available_bytes >= required_bytes and available_inodes >= required_inodes,
     )
+
+
+def capacity_decision(
+    workspace: CapacityObservation, docker: CapacityObservation
+) -> FilesystemCapacityDecision:
+    """Apply aggregate budgets when both paths use the same filesystem."""
+
+    if workspace.filesystem_identity == docker.filesystem_identity:
+        available_bytes = min(workspace.available_bytes, docker.available_bytes)
+        available_inodes = min(workspace.available_inodes, docker.available_inodes)
+        required_bytes = workspace.required_bytes + docker.required_bytes
+        required_inodes = workspace.required_inodes + docker.required_inodes
+        sufficient = available_bytes >= required_bytes and available_inodes >= required_inodes
+        return FilesystemCapacityDecision(
+            mode="shared",
+            workspace_identity=workspace.filesystem_identity,
+            docker_volume_identity=docker.filesystem_identity,
+            available_bytes=available_bytes,
+            available_inodes=available_inodes,
+            required_bytes=required_bytes,
+            required_inodes=required_inodes,
+            sufficient=sufficient,
+        )
+    return FilesystemCapacityDecision(
+        mode="independent",
+        workspace_identity=workspace.filesystem_identity,
+        docker_volume_identity=docker.filesystem_identity,
+        available_bytes=None,
+        available_inodes=None,
+        required_bytes=None,
+        required_inodes=None,
+        sufficient=workspace.sufficient and docker.sufficient,
+    )
+
+
+def _filesystem_identity(value: str | None) -> FilesystemIdentity:
+    if value is None or not value.isascii() or not value.isdecimal():
+        raise ValueError("filesystem device identity must be an unsigned decimal integer")
+    parsed = int(value, 10)
+    if parsed > (2**64 - 1):
+        raise ValueError("filesystem device identity is outside the supported range")
+    return FilesystemIdentity(kind="device_number", value=str(parsed))
 
 
 def _read_evidence(path: str) -> str:
@@ -178,6 +243,7 @@ def main() -> int:
     parser.add_argument("--docker-min-inodes", type=_threshold, default=DEFAULT_FREE_INODES)
     parser.add_argument("--docker-blocks-df")
     parser.add_argument("--docker-inodes-df")
+    parser.add_argument("--docker-filesystem-id")
     parser.add_argument("--docker-path", type=Path)
     parser.add_argument("--df-executable", default="df")
     arguments = parser.parse_args()
@@ -188,19 +254,23 @@ def main() -> int:
             arguments.workspace_min_inodes,
         )
         blocks, inodes = _docker_evidence(arguments)
+        docker_identity = _filesystem_identity(arguments.docker_filesystem_id)
         docker = docker_capacity(
             blocks,
             inodes,
+            docker_identity,
             arguments.docker_min_bytes,
             arguments.docker_min_inodes,
         )
-        passed = workspace.sufficient and docker.sufficient
+        decision = capacity_decision(workspace, docker)
+        passed = decision.sufficient
         payload: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "status": "passed" if passed else "infrastructure_invalid",
             "classification": "capacity_sufficient" if passed else "insufficient_capacity",
             "workspace": asdict(workspace),
             "docker_volume_storage": asdict(docker),
+            "filesystem_decision": asdict(decision),
         }
     except (OSError, RuntimeError, ValueError) as error:
         payload = {
@@ -209,6 +279,7 @@ def main() -> int:
             "classification": classify_exception(error),
             "workspace": None,
             "docker_volume_storage": None,
+            "filesystem_decision": None,
         }
         passed = False
     try:
