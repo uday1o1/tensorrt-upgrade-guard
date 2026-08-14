@@ -66,10 +66,13 @@ def parse_posix_df(text: str, *, kind: Literal["bytes", "inodes"]) -> int:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) != 2:
         raise ValueError("POSIX df output must contain one header and one data row")
-    header = lines[0].split()
+    header = tuple(field.lower() for field in lines[0].split())
     fields = lines[1].split()
-    expected = "Available" if kind == "bytes" else "IFree"
-    if expected not in header or len(fields) < 6:
+    reports_blocks = any("block" in field for field in header)
+    reports_inodes = any("inode" in field for field in header)
+    reports_available = any(field in {"available", "avail", "ifree", "free"} for field in header)
+    expected_kind = reports_blocks if kind == "bytes" else reports_inodes
+    if not expected_kind or not reports_available or len(fields) < 6:
         raise ValueError("POSIX df output has an unsupported schema")
     try:
         available = int(fields[-3])
@@ -212,6 +215,8 @@ def main() -> int:
         _write_atomic(arguments.output, payload)
     except OSError:
         return INFRASTRUCTURE_EXIT
+    json.dump(payload, sys.stdout, allow_nan=False, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
     return 0 if passed else INFRASTRUCTURE_EXIT
 
 

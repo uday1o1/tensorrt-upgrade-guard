@@ -26,9 +26,14 @@ BLOCKS = (
     "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test 100 10 90 10% /docker\n"
 )
 INODES = "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/test 1000 100 900 10% /docker\n"
+BUSYBOX_INODES = (
+    "Filesystem Inodes Used Available Use% Mounted on\n/dev/test 1000 100 900 10% /docker\n"
+)
 
 
-def _run(tmp_path: Path, blocks: str, inodes: str, *, bytes_required: int = 1) -> tuple[int, dict]:
+def _run(
+    tmp_path: Path, blocks: str, inodes: str, *, bytes_required: int = 1
+) -> tuple[int, dict, str]:
     blocks_path = tmp_path / "blocks.txt"
     inodes_path = tmp_path / "inodes.txt"
     output = tmp_path / "capacity.json"
@@ -60,14 +65,15 @@ def _run(tmp_path: Path, blocks: str, inodes: str, *, bytes_required: int = 1) -
         text=True,
         timeout=10,
     )
-    return result.returncode, json.loads(output.read_text(encoding="utf-8"))
+    return result.returncode, json.loads(output.read_text(encoding="utf-8")), result.stdout
 
 
 def test_capacity_cli_passes_and_atomically_publishes(tmp_path: Path) -> None:
-    status, payload = _run(tmp_path, BLOCKS, INODES)
+    status, payload, rendered = _run(tmp_path, BLOCKS, BUSYBOX_INODES)
     assert status == 0
     assert payload["status"] == "passed"
     assert payload["docker_volume_storage"]["available_bytes"] == 90 * 1024
+    assert json.loads(rendered) == payload
     assert not list(tmp_path.glob(".capacity.json.*"))
 
 
@@ -81,11 +87,12 @@ def test_capacity_cli_passes_and_atomically_publishes(tmp_path: Path) -> None:
 def test_capacity_cli_fails_for_bytes_or_inodes(
     tmp_path: Path, required_bytes: int, inodes: str, field: str
 ) -> None:
-    status, payload = _run(tmp_path, BLOCKS, inodes, bytes_required=required_bytes)
+    status, payload, rendered = _run(tmp_path, BLOCKS, inodes, bytes_required=required_bytes)
     assert status == 4
     assert payload["status"] == "infrastructure_invalid"
     assert payload["classification"] == "insufficient_capacity"
     assert payload["docker_volume_storage"][field] >= 0
+    assert json.loads(rendered) == payload
 
 
 def test_workspace_statvfs_observation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -99,9 +106,10 @@ def test_workspace_statvfs_observation(monkeypatch: pytest.MonkeyPatch, tmp_path
 
 
 def test_malformed_and_inaccessible_capacity_fail_closed(tmp_path: Path) -> None:
-    status, payload = _run(tmp_path, "not df\n", INODES)
+    status, payload, rendered = _run(tmp_path, "not df\n", INODES)
     assert status == 4
     assert payload["classification"] == "infrastructure_invalid"
+    assert json.loads(rendered) == payload
     output = tmp_path / "missing.json"
     result = subprocess.run(  # noqa: S603
         [
