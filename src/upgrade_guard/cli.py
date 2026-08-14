@@ -25,7 +25,7 @@ from upgrade_guard.report.html_report import render_html
 from upgrade_guard.report.json_report import render_json
 from upgrade_guard.report.model import ReportModel
 from upgrade_guard.report.text import render_text
-from upgrade_guard.reproduce.run import prepare_replay, require_gpu_for_replay
+from upgrade_guard.reproduce.run import execute_replay
 from upgrade_guard.reproduce.verify import verify_bundle
 
 app = typer.Typer(
@@ -117,6 +117,10 @@ def compare_command(
     else:
         typer.echo(f"Qualification status: {summary['status']}")
         typer.echo(f"Failure codes: {', '.join(summary['failure_codes']) or 'none'}")
+    if summary["status"] == "failed":
+        raise typer.Exit(code=1)
+    if summary["status"] in {"inconclusive", "infrastructure_invalid"}:
+        raise typer.Exit(code=4)
 
 
 @app.command("reduce")
@@ -275,19 +279,23 @@ def reproduce_run_command(
     ] = False,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Prepare a typed replay without ever invoking bundled reproduce.sh."""
+    """Verify and execute a typed replay without invoking bundled reproduce.sh."""
 
-    del output
     try:
-        plan = prepare_replay(
+        result = execute_replay(
             bundle,
+            output,
             trust_source_code=trust_source_code,
             trust_included_engine=trust_included_engine,
         )
-        require_gpu_for_replay()
     except UpgradeGuardError as error:
         _fail(error, json_output=json_output)
-    typer.echo(json.dumps(asdict(plan), indent=2))
+    payload = asdict(result)
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        typer.echo(f"Reproduced {result.expected_failure_code}: {result.bundle_id}")
+        typer.echo(f"Evidence: {output / 'replay-result.json'}")
 
 
 @app.command("report")

@@ -18,6 +18,7 @@ from upgrade_guard.contracts.qualification import QualificationSpec, ShapeRange
 from upgrade_guard.errors import FailureCode, InfrastructureError, InvalidInputError
 from upgrade_guard.qualification import (
     _block_variation_reasons,
+    _host_load_1m,
     _jsonable,
     _observe_validity,
     _optional_float,
@@ -234,6 +235,31 @@ def test_hardware_observation_errors_and_optional_parsing() -> None:
     assert _optional_int("not-a-number") is None
     assert _optional_float("1.25") == 1.25
     assert _optional_int("12") == 12
+
+
+def test_loaded_hardware_observation_does_not_apply_idle_limit() -> None:
+    specification = _specification()
+    loaded = CommandResult(
+        ("nvidia-smi",),
+        0,
+        ("GPU-11111111-1111-1111-1111-111111111111, 55, 2100, 9000, 250, 300, 99\n"),
+        "",
+        0.01,
+    )
+    _, idle_reasons = _observe_validity(
+        ObservationRunner(loaded),
+        specification.hardware_validity.selected_gpu_uuid,
+        specification,
+    )
+    observed, loaded_reasons = _observe_validity(
+        ObservationRunner(loaded),
+        specification.hardware_validity.selected_gpu_uuid,
+        specification,
+        require_idle=False,
+    )
+    assert idle_reasons == ("gpu_not_idle_before_block",)
+    assert loaded_reasons == ()
+    assert observed["host_load_1m"] == _host_load_1m()
 
 
 def test_status_json_and_path_translation_helpers(tmp_path: Path) -> None:

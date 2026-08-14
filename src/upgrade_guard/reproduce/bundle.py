@@ -52,7 +52,7 @@ def export_bundle(request: BundleExport, destination: Path) -> BundleManifest:
                 request.expected_failure.model_dump_json(indent=2).encode("utf-8") + b"\n"
             ),
             "README.md": _readme(request).encode("utf-8"),
-            "reproduce.sh": _reproduce_script().encode("utf-8"),
+            "reproduce.sh": _reproduce_script(request).encode("utf-8"),
         }
         input_names: list[str] = []
         for index, input_source in enumerate(request.inputs):
@@ -190,6 +190,7 @@ def _media_type(path: str) -> str:
         ".h": "text/x-chdr",
         ".cmake": "text/x-cmake",
         ".plan": "application/octet-stream",
+        ".py": "text/x-python",
     }.get(suffix, "application/octet-stream")
 
 
@@ -207,15 +208,25 @@ def _readme(request: BundleExport) -> str:
         "Serialized engines and containers are executable trust boundaries.\n\n"
         "```bash\n"
         "upgrade-guard reproduce verify .\n"
-        "upgrade-guard reproduce run . --out replay\n"
+        f"upgrade-guard reproduce run . --out ../replay{_trust_flags(request)}\n"
         "```\n"
     )
 
 
-def _reproduce_script() -> str:
+def _trust_flags(request: BundleExport) -> str:
+    flags = ""
+    if request.source_files:
+        flags += " --trust-source-code"
+    if request.included_engine is not None:
+        flags += " --trust-included-engine"
+    return flags
+
+
+def _reproduce_script(request: BundleExport) -> str:
     return (
         "#!/usr/bin/env bash\n"
         "set -Eeuo pipefail\n"
         'bundle_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
-        'exec upgrade-guard reproduce run "${bundle_root}" --out "${bundle_root}/replay"\n'
+        'exec upgrade-guard reproduce run "${bundle_root}" '
+        f'--out "${{bundle_root}}/../replay-{request.id}"{_trust_flags(request)}\n'
     )

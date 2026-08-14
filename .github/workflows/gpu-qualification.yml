@@ -26,11 +26,3 @@ jobs:
         run: |
           test -n "${UG_EXPECTED_GPU_UUID}"
           bash scripts/run_cuda_pm_qualification.sh
-      - name: Retain qualification evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: gpu-qualification-${{ github.sha }}
-          path: .upgrade-guard/cuda-pm
-          include-hidden-files: true
-          retention-days: 14

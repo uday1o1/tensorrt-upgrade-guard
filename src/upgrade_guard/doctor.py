@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from upgrade_guard.containers.commands import CommandResult, CommandRunner, Runner
 from upgrade_guard.contracts.doctor import DoctorDocker, DoctorGpu, DoctorIssue, DoctorResult
+from upgrade_guard.errors import InfrastructureError
 
 
 def run_doctor(runner: Runner | None = None) -> DoctorResult:
@@ -38,9 +39,31 @@ def run_doctor(runner: Runner | None = None) -> DoctorResult:
             )
         )
 
-    docker, docker_issues = _probe_docker(command_runner)
+    try:
+        docker, docker_issues = _probe_docker(command_runner)
+    except InfrastructureError as error:
+        docker = DoctorDocker(available=False)
+        docker_issues = [
+            DoctorIssue(
+                code="DOCKER_PROBE_TIMEOUT",
+                category="infrastructure",
+                message="Docker inspection did not finish within its bounded timeout",
+                evidence=error.message,
+            )
+        ]
     issues.extend(docker_issues)
-    gpus, gpu_issues = _probe_gpus(command_runner)
+    try:
+        gpus, gpu_issues = _probe_gpus(command_runner)
+    except InfrastructureError as error:
+        gpus = []
+        gpu_issues = [
+            DoctorIssue(
+                code="NVIDIA_GPU_PROBE_TIMEOUT",
+                category="infrastructure",
+                message="NVIDIA GPU inspection did not finish within its bounded timeout",
+                evidence=error.message,
+            )
+        ]
     issues.extend(gpu_issues)
 
     if docker.available and docker.server_os != "linux":
@@ -61,18 +84,6 @@ def run_doctor(runner: Runner | None = None) -> DoctorResult:
                 evidence=docker.server_architecture,
             )
         )
-    if docker.available and "nvidia" not in docker.runtimes and system == "Linux":
-        issues.append(
-            DoctorIssue(
-                code="NVIDIA_CONTAINER_RUNTIME_UNCONFIRMED",
-                category="infrastructure",
-                message=(
-                    "Docker does not report an NVIDIA runtime; matrix lock must prove GPU injection"
-                ),
-                evidence=",".join(docker.runtimes),
-            )
-        )
-
     outcome = _outcome(issues)
     return DoctorResult(
         schema_version="upgradeguard.dev/doctor/v1",

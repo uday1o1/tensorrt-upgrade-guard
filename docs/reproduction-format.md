@@ -15,6 +15,7 @@ baseline.environment.json
 candidate.environment.json
 qualification.yaml
 expected.json
+commands/replay.json
 reproduce.sh
 ```
 
@@ -48,6 +49,21 @@ An included engine independently requires `--trust-included-engine`.
 
 The CLI never executes `reproduce.sh` from the bundle.
 That file exists only as a convenience for a trusted operator who chooses to invoke it directly.
+
+## Typed execution
+
+```bash
+upgrade-guard reproduce run BUNDLE --out EMPTY_DIR --trust-source-code --json
+```
+
+The output directory must not exist and must be outside a directory-form bundle.
+The CLI verifies and materializes the bundle before opening the candidate environment lock or replay recipe.
+It requires the locked worker manifest and GPU UUID to match the reviewed source-build request.
+It then runs only the argument arrays in `commands/replay.json` through the isolated GPU worker boundary.
+The first recipe step must exactly match the build command in the bundle manifest.
+Every step declares accepted return codes and any required result-file status or JSON predicate.
+The replay passes only when the clean control succeeds and the seeded case fails for the authored reason.
+The CLI writes per-step records and `replay-result.json` into the new output directory.
 
 ## Reduction order
 

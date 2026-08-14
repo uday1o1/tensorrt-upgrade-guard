@@ -11,7 +11,10 @@ from upgrade_guard.contracts.doctor import (
     DoctorResult,
 )
 from upgrade_guard.contracts.environment import (
+    CompatibilityEvidence,
+    EnvironmentLock,
     GpuObservation,
+    HostObservation,
     PlatformIdentity,
     ResolvedImage,
     ToolObservation,
@@ -143,6 +146,54 @@ def supported_doctor(
             ),
         ),
         issues=(),
+    )
+
+
+def environment_lock(
+    *,
+    environment_id: str = "candidate",
+    worker_manifest_character: str = "1",
+    gpu_uuid: str = "GPU-11111111-1111-1111-1111-111111111111",
+) -> EnvironmentLock:
+    """Return one internally consistent immutable test environment."""
+
+    base = resolved_image(
+        reference="registry.example/base:v1",
+        manifest_character="3",
+        config_character="4",
+    )
+    worker = resolved_image(
+        reference="registry.example/worker:v1",
+        manifest_character=worker_manifest_character,
+        config_character="5",
+    )
+    return EnvironmentLock(
+        id=environment_id,
+        base_image=base,
+        worker_image=worker,
+        declared_base_manifest_digest=base.manifest_digest,
+        probe=worker_probe(manifest_digest=worker.manifest_digest, gpu_uuid=gpu_uuid),
+        host=HostObservation(
+            operating_system="Ubuntu 24.04",
+            kernel="6.8.0",
+            architecture="x86_64",
+            docker_client_version="29.0.0",
+            docker_server_version="29.0.0",
+            docker_runtime="nvidia",
+            nvidia_container_toolkit_version="1.18.0",
+        ),
+        compatibility=CompatibilityEvidence(
+            policy_version="test-v1",
+            source_urls=("https://docs.nvidia.com/",),
+            checked_at=FIXED_TIME,
+            minimum_driver="580.0",
+            minimum_compute_capability="8.0",
+            compatible=True,
+            reasons=(),
+        ),
+        probe_command_sha256=digest("6"),
+        probe_output_sha256=digest("7"),
+        probed_at=FIXED_TIME,
     )
 
 

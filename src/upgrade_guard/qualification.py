@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -253,6 +255,8 @@ class QualificationRunner:
                 str(specification.builder.workspace_limit_bytes),
                 "--optimization-level",
                 str(specification.builder.optimization_level),
+                "--cache-state",
+                "cold" if index == 0 else "warm",
             )
             self.worker.run(
                 image=environment.worker_image.canonical_reference,
@@ -350,20 +354,78 @@ class QualificationRunner:
                 pair_records: list[dict[str, Any]] = []
                 for order_index, environment_id in enumerate(order):
                     environment = environments[environment_id]
-                    before, reasons = _observe_validity(
-                        self.runner,
-                        matrix.gpu_uuid,
-                        specification,
-                    )
-                    if reasons:
+                    idle: dict[str, Any] = {}
+                    idle_reasons: tuple[str, ...] = ("gpu_idle_wait_not_started",)
+                    idle_attempts: list[dict[str, Any]] = []
+                    for idle_attempt in range(60):
+                        idle, idle_reasons = _observe_validity(
+                            self.runner,
+                            matrix.gpu_uuid,
+                            specification,
+                        )
+                        idle_attempts.append(
+                            {
+                                "attempt": idle_attempt,
+                                "observed": idle,
+                                "rejection_reasons": list(idle_reasons),
+                            }
+                        )
+                        if not idle_reasons:
+                            break
+                        time.sleep(1)
+                    if idle_reasons:
                         pair_records.append(
                             {
                                 "pair_attempt": attempt,
                                 "order_in_pair": order_index,
                                 "environment_id": environment_id,
                                 "accepted": False,
-                                "rejection_reasons": list(reasons),
+                                "rejection_reasons": list(idle_reasons),
+                                "idle": idle,
+                                "idle_attempts": idle_attempts,
+                                "profiled": False,
+                            }
+                        )
+                        break
+                    precondition_command = benchmark_command(
+                        trtexec_path=environment.probe.trtexec.path or "trtexec",
+                        supported_options=environment.probe.trtexec.options,
+                        engine=f"/output/{environment_id}/{precision}/engine-0.plan",
+                        shapes=shape.inputs,
+                        export_times=(
+                            f"/output/{environment_id}/{precision}/{shape_id}/"
+                            f"precondition-attempt-{attempt:02d}.json"
+                        ),
+                        warmup_milliseconds=specification.performance.warmup_milliseconds,
+                        measurement_milliseconds=1000,
+                    )
+                    self._run_benchmark_worker(
+                        specification,
+                        matrix,
+                        environment,
+                        staging,
+                        precondition_command,
+                        measurement_milliseconds=1000,
+                    )
+                    before, before_reasons = _observe_validity(
+                        self.runner,
+                        matrix.gpu_uuid,
+                        specification,
+                        require_idle=False,
+                    )
+                    if before_reasons:
+                        pair_records.append(
+                            {
+                                "pair_attempt": attempt,
+                                "order_in_pair": order_index,
+                                "environment_id": environment_id,
+                                "accepted": False,
+                                "rejection_reasons": list(before_reasons),
+                                "idle": idle,
+                                "idle_attempts": idle_attempts,
                                 "before": before,
+                                "precondition_command": list(precondition_command),
+                                "precondition_command_sha256": command_sha256(precondition_command),
                                 "profiled": False,
                             }
                         )
@@ -387,21 +449,14 @@ class QualificationRunner:
                         warmup_milliseconds=specification.performance.warmup_milliseconds,
                         measurement_milliseconds=specification.performance.measurement_milliseconds,
                     )
-                    self.worker.run(
-                        image=environment.worker_image.canonical_reference,
-                        gpu_uuid=matrix.gpu_uuid,
-                        mounts=WorkerMounts(
-                            self.source_root,
-                            self.source_root
-                            / ".upgrade-guard"
-                            / "corpora"
-                            / specification.corpus_lock_id,
-                            staging,
-                        ),
-                        command=command,
-                        timeout_seconds=max(
-                            120,
-                            specification.performance.measurement_milliseconds / 1000 + 60,
+                    self._run_benchmark_worker(
+                        specification,
+                        matrix,
+                        environment,
+                        staging,
+                        command,
+                        measurement_milliseconds=(
+                            specification.performance.measurement_milliseconds
                         ),
                     )
                     timing = load_exported_times(times_path)
@@ -409,6 +464,7 @@ class QualificationRunner:
                         self.runner,
                         matrix.gpu_uuid,
                         specification,
+                        require_idle=False,
                     )
                     after_reasons = (
                         *after_reasons,
@@ -424,8 +480,12 @@ class QualificationRunner:
                             "command_sha256": command_sha256(command),
                             "accepted": not after_reasons,
                             "rejection_reasons": list(after_reasons),
+                            "idle": idle,
+                            "idle_attempts": idle_attempts,
                             "before": before,
                             "after": after,
+                            "precondition_command": list(precondition_command),
+                            "precondition_command_sha256": command_sha256(precondition_command),
                             **asdict(timing),
                             "profiled": False,
                         }
@@ -469,6 +529,28 @@ class QualificationRunner:
             "raw_blocks": raw_blocks,
             "profiled": False,
         }
+
+    def _run_benchmark_worker(
+        self,
+        specification: QualificationSpec,
+        matrix: MatrixLock,
+        environment: EnvironmentLock,
+        staging: Path,
+        command: tuple[str, ...],
+        *,
+        measurement_milliseconds: int,
+    ) -> None:
+        self.worker.run(
+            image=environment.worker_image.canonical_reference,
+            gpu_uuid=matrix.gpu_uuid,
+            mounts=WorkerMounts(
+                self.source_root,
+                self.source_root / ".upgrade-guard" / "corpora" / specification.corpus_lock_id,
+                staging,
+            ),
+            command=command,
+            timeout_seconds=max(120, measurement_milliseconds / 1000 + 60),
+        )
 
 
 def compare_stored_run(directory: Path) -> dict[str, Any]:
@@ -681,6 +763,8 @@ def _observe_validity(
     runner: Runner,
     gpu_uuid: str,
     specification: QualificationSpec,
+    *,
+    require_idle: bool = True,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     query = runner.run(
         (
@@ -723,6 +807,7 @@ def _observe_validity(
         "power_watts": power,
         "power_limit_watts": power_limit,
         "utilization_percent": utilization,
+        "host_load_1m": _host_load_1m(),
         "competing_compute_processes": processes,
     }
     observation = ValidityObservation(
@@ -733,6 +818,8 @@ def _observe_validity(
         utilization_percent_before=utilization,
         maximum_idle_utilization_percent=(
             specification.hardware_validity.maximum_gpu_utilization_before_block
+            if require_idle
+            else 100.0
         ),
         competing_compute_processes=(
             processes if specification.hardware_validity.reject_competing_compute_processes else ()
@@ -789,4 +876,11 @@ def _optional_int(value: str) -> int | None:
     try:
         return int(value)
     except ValueError:
+        return None
+
+
+def _host_load_1m() -> float | None:
+    try:
+        return os.getloadavg()[0]
+    except (AttributeError, OSError):
         return None

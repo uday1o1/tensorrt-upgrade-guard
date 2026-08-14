@@ -18,8 +18,8 @@ def main() -> None:
     arguments = parser.parse_args()
     root = arguments.destination
     root.mkdir(parents=True, exist_ok=True)
-    tokens = np.zeros((9, 513, 256), dtype=np.float32)
-    mask = np.zeros((9, 1, 1, 513), dtype=np.float32)
+    tokens = np.zeros((9, 8, 256), dtype=np.float32)
+    mask = np.zeros((9, 1, 1, 8), dtype=np.float32)
     g7 = root / "g7"
     g7.mkdir(exist_ok=True)
     np.save(g7 / "tokens.npy", tokens, allow_pickle=False)

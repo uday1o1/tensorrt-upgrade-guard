@@ -6,14 +6,10 @@ FROM ${BASE_IMAGE}
 ARG BASE_MANIFEST_DIGEST
 LABEL com.udayarora.upgradeguard.base.manifest.digest="${BASE_MANIFEST_DIGEST}"
 
-ARG CUDA_PYTHON_VERSION=13.3.1
-ARG ONNX_VERSION=1.22.0
-ARG ONNXRUNTIME_VERSION=1.28.0
+COPY containers/requirements-worker.txt /tmp/requirements-worker.txt
 
-RUN python3 -m pip install --no-cache-dir \
-      "cuda-python==${CUDA_PYTHON_VERSION}" \
-      "onnx==${ONNX_VERSION}" \
-      "onnxruntime==${ONNXRUNTIME_VERSION}" \
+RUN python3 -m pip install --no-cache-dir --require-hashes \
+      --requirement /tmp/requirements-worker.txt \
     && python3 -m pip check
 
 # UpgradeGuard source is mounted read-only and hashed for each run.

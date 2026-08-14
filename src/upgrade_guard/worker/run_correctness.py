@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from upgrade_guard.worker.common import sha256_file, write_json_atomic
+from upgrade_guard.worker.common import process_memory_evidence, sha256_file, write_json_atomic
 
 
 def _checked(result: tuple[Any, ...], operation: str) -> tuple[Any, ...]:
@@ -70,12 +70,14 @@ def run_engine(arguments: argparse.Namespace) -> dict[str, Any]:
     allocations: list[int] = []
     host_outputs: dict[str, np.ndarray[Any, Any]] = {}
     output_pointers: dict[str, int] = {}
+    io_device_allocation_bytes = 0
     try:
         for name in input_names:
             array = np.ascontiguousarray(inputs[name])
             (pointer,) = _checked(cudart.cudaMalloc(array.nbytes), f"cudaMalloc({name})")
             pointer_value = int(pointer)
             allocations.append(pointer_value)
+            io_device_allocation_bytes += array.nbytes
             _checked(
                 cudart.cudaMemcpyAsync(
                     pointer_value,
@@ -97,6 +99,7 @@ def run_engine(arguments: argparse.Namespace) -> dict[str, Any]:
             (pointer,) = _checked(cudart.cudaMalloc(array.nbytes), f"cudaMalloc({name})")
             pointer_value = int(pointer)
             allocations.append(pointer_value)
+            io_device_allocation_bytes += array.nbytes
             host_outputs[name] = array
             output_pointers[name] = pointer_value
             if not context.set_tensor_address(name, pointer_value):
@@ -140,6 +143,19 @@ def run_engine(arguments: argparse.Namespace) -> dict[str, Any]:
             "engine_sha256": sha256_file(arguments.engine),
             "input_sha256": {name: sha256_file(path) for name, path in input_paths.items()},
             "repetitions": repetitions,
+            "memory_diagnostics": {
+                "execution_context_device_memory_bytes": int(
+                    context.update_device_memory_size_for_shapes()
+                    if hasattr(context, "update_device_memory_size_for_shapes")
+                    else (
+                        engine.device_memory_size_v2
+                        if hasattr(engine, "device_memory_size_v2")
+                        else engine.device_memory_size
+                    )
+                ),
+                "io_device_allocation_bytes": io_device_allocation_bytes,
+                "process": process_memory_evidence(),
+            },
             "tensorrt_version": trt.__version__,
         }
     finally:

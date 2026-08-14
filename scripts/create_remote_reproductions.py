@@ -44,14 +44,25 @@ def main() -> None:
     matrix = MatrixLock.model_validate_json(
         (state / "matrix.lock.json").read_text(encoding="utf-8")
     )
-    bundle = _bundle(root, state, project, corpus, matrix, signature)
-    clean = root / "clean-bundle"
-    verified = (
-        verify_bundle(clean) if clean.exists() else materialize_verified_bundle(bundle, clean)
-    )
-    plan = prepare_replay(clean, trust_source_code=True, trust_included_engine=False)
-    if plan.selected_gpu_uuid != matrix.gpu_uuid or not plan.source_paths:
-        raise RuntimeError("clean replay plan does not preserve the locked GPU and sources")
+    bundles = {
+        "G2": _g2_bundle(root, state, project, corpus, matrix, signature),
+        "G7": _g7_bundle(root, state, project, matrix, signature),
+    }
+    clean_bundles: dict[str, dict[str, object]] = {}
+    for seed, bundle in bundles.items():
+        clean = root / f"{seed}-clean-bundle"
+        verified = (
+            verify_bundle(clean) if clean.exists() else materialize_verified_bundle(bundle, clean)
+        )
+        plan = prepare_replay(clean, trust_source_code=True, trust_included_engine=False)
+        if plan.selected_gpu_uuid != matrix.gpu_uuid or not plan.source_paths:
+            raise RuntimeError("clean replay plan does not preserve the locked GPU and sources")
+        clean_bundles[seed] = {
+            "bundle_manifest_sha256": verified.manifest.manifest_sha256,
+            "bundle_id": plan.bundle_id,
+            "source_paths": plan.source_paths,
+            "clean_directory": str(clean),
+        }
     result = {
         "schema_version": "upgradeguard.dev/reduction-replay/v1",
         "status": "prepared",
@@ -59,11 +70,8 @@ def main() -> None:
         "numerical": numerical,
         "performance": performance,
         "profile": profile,
-        "bundle_manifest_sha256": verified.manifest.manifest_sha256,
-        "bundle_id": plan.bundle_id,
-        "source_paths": plan.source_paths,
         "selected_gpu_uuid": plan.selected_gpu_uuid,
-        "clean_directory": str(clean),
+        "clean_bundles": clean_bundles,
     }
     (root / "prepared.json").write_text(
         json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n",
@@ -153,7 +161,7 @@ def _profile(root: Path, signature: str) -> dict[str, object]:
         {
             "kind": "profile",
             "input_name": "tokens",
-            "observed_shape": [9, 513, 256],
+            "observed_shape": [9, 8, 256],
             "minimum_shape": [1, 8, 256],
             "maximum_shape": [8, 512, 256],
         },
@@ -167,7 +175,7 @@ def _profile(root: Path, signature: str) -> dict[str, object]:
     )
 
 
-def _bundle(
+def _g2_bundle(
     root: Path,
     state: Path,
     project: Path,
@@ -185,29 +193,92 @@ def _bundle(
     baseline_path.write_text(matrix.environments[0].model_dump_json(indent=2), encoding="utf-8")
     candidate_path.write_text(matrix.environments[1].model_dump_json(indent=2), encoding="utf-8")
     commands = environment_root / "commands.json"
+    build_command = (
+        "cmake",
+        "-S",
+        "/opt/upgrade-guard",
+        "-B",
+        "/output/build",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        "-DUPGRADE_GUARD_BUILD_TESTS=OFF",
+        "-DUPGRADE_GUARD_BUILD_FAULTS=ON",
+    )
     commands.write_text(
         json.dumps(
             {
-                "configure": [
-                    "cmake",
-                    "-S",
-                    "/bundle",
-                    "-B",
-                    "/output/build",
-                    "-G",
-                    "Ninja",
-                    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-                    "-DUPGRADE_GUARD_BUILD_TESTS=OFF",
-                    "-DUPGRADE_GUARD_BUILD_FAULTS=ON",
+                "schema_version": "upgradeguard.dev/replay-recipe/v1",
+                "expected_failure_code": "NUMERICAL_REGRESSION",
+                "steps": [
+                    {"id": "configure", "command": list(build_command)},
+                    {
+                        "id": "compile",
+                        "command": [
+                            "cmake",
+                            "--build",
+                            "/output/build",
+                            "--target",
+                            "upgrade_guard_residual_rmsnorm",
+                            "upgrade_guard_gpu_faults",
+                        ],
+                    },
+                    {
+                        "id": "build-engine",
+                        "command": [
+                            "python3",
+                            "-m",
+                            "upgrade_guard.worker.build_engine",
+                            "--model",
+                            "/corpus/model.onnx",
+                            "--profile",
+                            "/corpus/profile.json",
+                            "--engine",
+                            "/output/engine.plan",
+                            "--inspector",
+                            "/output/inspector.json",
+                            "--timing-cache",
+                            "/output/timing.cache",
+                            "--result",
+                            "/output/build-engine.json",
+                            "--plugin",
+                            "/output/build/libupgrade_guard_residual_rmsnorm.so",
+                        ],
+                        "result_file": "build-engine.json",
+                        "expected_result_status": "passed",
+                    },
+                    {
+                        "id": "clean-control",
+                        "command": [
+                            "python3",
+                            "-m",
+                            "upgrade_guard.worker.run_correctness",
+                            "--engine",
+                            "/output/engine.plan",
+                            "--input",
+                            "x=/corpus/inputs/000-x.npy",
+                            "--input",
+                            "residual=/corpus/inputs/001-residual.npy",
+                            "--input",
+                            "gamma=/corpus/inputs/002-gamma.npy",
+                            "--output",
+                            "/output/control-outputs",
+                            "--result",
+                            "/output/control.json",
+                            "--repetitions",
+                            "20",
+                            "--plugin",
+                            "/output/build/libupgrade_guard_residual_rmsnorm.so",
+                        ],
+                        "result_file": "control.json",
+                        "expected_result_status": "passed",
+                    },
+                    {
+                        "id": "seeded-failure",
+                        "command": ["/output/build/upgrade_guard_gpu_faults"],
+                        "stdout_json_equals": {"G2.detected": True, "G2.control": "passed"},
+                    },
                 ],
-                "build": [
-                    "cmake",
-                    "--build",
-                    "/output/build",
-                    "--target",
-                    "upgrade_guard_gpu_faults",
-                ],
-                "run": ["/output/build/upgrade_guard_gpu_faults"],
             },
             indent=2,
             sort_keys=True,
@@ -220,6 +291,7 @@ def _bundle(
         *(project / "cpp" / "kernels").glob("*"),
         *(project / "cpp" / "plugin").glob("*"),
         *(project / "cpp" / "faults").glob("*"),
+        *(project / "src" / "upgrade_guard").rglob("*.py"),
     ]
     source_files = {
         path.relative_to(project).as_posix(): path
@@ -240,17 +312,22 @@ def _bundle(
         threshold="absolute error exceeds 0.1",
         evidence=(),
     )
-    build_command = (
-        "cmake",
-        "-S",
-        "/bundle",
-        "-B",
-        "/output/build",
-        "-G",
-        "Ninja",
-        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-        "-DUPGRADE_GUARD_BUILD_TESTS=OFF",
-        "-DUPGRADE_GUARD_BUILD_FAULTS=ON",
+    profile = environment_root / "plugin-profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "x": {"min": [1, 1, 7], "opt": [2, 17, 256], "max": [8, 512, 259]},
+                "residual": {
+                    "min": [1, 1, 7],
+                    "opt": [2, 17, 256],
+                    "max": [8, 512, 259],
+                },
+                "gamma": {"min": [7], "opt": [256], "max": [259]},
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
     )
     export_bundle(
         BundleExport(
@@ -266,7 +343,180 @@ def _bundle(
                 corpus / "fp32" / "tail-random-h259" / "gamma.npy",
             ),
             expected_failure=expected,
-            extra_files={"commands/replay.json": commands},
+            extra_files={"commands/replay.json": commands, "profile.json": profile},
+            source_files=source_files,
+            worker_image_manifest_digest=matrix.environments[1].worker_image.manifest_digest,
+            selected_gpu_uuid=matrix.gpu_uuid,
+            source_build_command=build_command,
+        ),
+        bundle,
+    )
+    return bundle
+
+
+def _g7_bundle(
+    root: Path,
+    state: Path,
+    project: Path,
+    matrix: MatrixLock,
+    signature: str,
+) -> Path:
+    bundle = root / "G7-bundle"
+    if bundle.exists():
+        return bundle
+    environment_root = root / "bundle-inputs"
+    environment_root.mkdir(exist_ok=True)
+    baseline_path = environment_root / "baseline.json"
+    candidate_path = environment_root / "candidate.json"
+    baseline_path.write_text(matrix.environments[0].model_dump_json(indent=2), encoding="utf-8")
+    candidate_path.write_text(matrix.environments[1].model_dump_json(indent=2), encoding="utf-8")
+    commands = environment_root / "G7-commands.json"
+    profile = environment_root / "transformer-profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "min": [1, 8, 256],
+                    "opt": [4, 128, 256],
+                    "max": [8, 512, 256],
+                },
+                "mask": {
+                    "min": [1, 1, 1, 8],
+                    "opt": [4, 1, 1, 128],
+                    "max": [8, 1, 1, 512],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    build_command = (
+        "python3",
+        "-m",
+        "upgrade_guard.worker.build_engine",
+        "--model",
+        "/corpus/model.onnx",
+        "--profile",
+        "/corpus/profile.json",
+        "--engine",
+        "/output/engine.plan",
+        "--inspector",
+        "/output/inspector.json",
+        "--timing-cache",
+        "/output/timing.cache",
+        "--result",
+        "/output/build-engine.json",
+    )
+    commands.write_text(
+        json.dumps(
+            {
+                "schema_version": "upgradeguard.dev/replay-recipe/v1",
+                "expected_failure_code": "PROFILE_REJECTED",
+                "steps": [
+                    {
+                        "id": "build-engine",
+                        "command": list(build_command),
+                        "result_file": "build-engine.json",
+                        "expected_result_status": "passed",
+                    },
+                    {
+                        "id": "clean-control",
+                        "command": [
+                            "python3",
+                            "-m",
+                            "upgrade_guard.worker.run_correctness",
+                            "--engine",
+                            "/output/engine.plan",
+                            "--input",
+                            "tokens=/corpus/control/tokens.npy",
+                            "--input",
+                            "mask=/corpus/control/mask.npy",
+                            "--output",
+                            "/output/control-outputs",
+                            "--result",
+                            "/output/control.json",
+                            "--repetitions",
+                            "20",
+                        ],
+                        "result_file": "control.json",
+                        "expected_result_status": "passed",
+                    },
+                    {
+                        "id": "seeded-failure",
+                        "command": [
+                            "python3",
+                            "-m",
+                            "upgrade_guard.worker.run_correctness",
+                            "--engine",
+                            "/output/engine.plan",
+                            "--input",
+                            "tokens=/corpus/inputs/000-tokens.npy",
+                            "--input",
+                            "mask=/corpus/inputs/001-mask.npy",
+                            "--output",
+                            "/output/failure-outputs",
+                            "--result",
+                            "/output/failure.json",
+                            "--repetitions",
+                            "20",
+                        ],
+                        "accepted_returncodes": [1],
+                        "result_file": "failure.json",
+                        "expected_result_status": "failed",
+                        "result_message_contains": "input shape was rejected",
+                    },
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    source_files = {
+        path.relative_to(project).as_posix(): path
+        for path in sorted((project / "src" / "upgrade_guard").rglob("*.py"))
+        if path.is_file()
+    }
+    expected = FailureRecord(
+        code=FailureCode.PROFILE_REJECTED,
+        phase=Phase.CORRECTNESS,
+        environment_id="candidate",
+        model_id="tiny-transformer-fp32",
+        precision=PrecisionMode.FP32,
+        shape_id="b9_s8",
+        input_fixture_id="b9_s8",
+        output_name=None,
+        gate="optimization_profile",
+        observed="tokens shape [9, 8, 256] exceeds the locked profile",
+        threshold="maximum tokens shape [8, 512, 256]",
+        evidence=(),
+    )
+    core = project / ".upgrade-guard" / "corpora" / "v1-core"
+    export_bundle(
+        BundleExport(
+            id=f"G7-{signature.removeprefix('sha256:')[:12]}",
+            created_at=datetime.now(UTC),
+            baseline_environment=baseline_path,
+            candidate_environment=candidate_path,
+            qualification=state / "full.yaml",
+            model=core / "models" / "tiny-transformer-fp32.onnx",
+            inputs=(state / "faults" / "g7" / "tokens.npy", state / "faults" / "g7" / "mask.npy"),
+            expected_failure=expected,
+            extra_files={
+                "commands/replay.json": commands,
+                "profile.json": profile,
+                "control/tokens.npy": core
+                / "inputs"
+                / "tiny-transformer-fp32"
+                / "b8_s512"
+                / "tokens.npy",
+                "control/mask.npy": core
+                / "inputs"
+                / "tiny-transformer-fp32"
+                / "b8_s512"
+                / "mask.npy",
+            },
             source_files=source_files,
             worker_image_manifest_digest=matrix.environments[1].worker_image.manifest_digest,
             selected_gpu_uuid=matrix.gpu_uuid,

@@ -67,7 +67,9 @@ def _trtexec() -> dict[str, Any]:
     returncode, help_text = _run((path, "--help"))
     if returncode != 0 or not help_text:
         return {"available": False}
-    options = sorted(set(re.findall(r"--([A-Za-z0-9][A-Za-z0-9-]*)", help_text)))
+    options = sorted(
+        {f"--{option}" for option in re.findall(r"--([A-Za-z0-9][A-Za-z0-9-]*)", help_text)}
+    )
     if not options:
         return {"available": False}
     observation["help_sha256"] = f"sha256:{hashlib.sha256(help_text.encode()).hexdigest()}"

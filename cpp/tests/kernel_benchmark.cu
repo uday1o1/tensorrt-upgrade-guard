@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <nvtx3/nvToolsExt.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -102,6 +103,15 @@ float benchmark(bool optimized, Buffers const& buffers, std::int32_t rows, std::
     return ok ? milliseconds / static_cast<float>(repetitions) : NAN;
 }
 
+float percentile(std::vector<float> values, float quantile)
+{
+    std::sort(values.begin(), values.end());
+    std::size_t const index = static_cast<std::size_t>(
+        std::ceil(quantile * static_cast<float>(values.size())))
+        - 1U;
+    return values[std::min(index, values.size() - 1U)];
+}
+
 bool profileOnly()
 {
     constexpr std::int32_t rows{4096};
@@ -111,17 +121,25 @@ bool profileOnly()
     {
         return false;
     }
-    nvtxRangePushA("upgrade_guard/residual_rmsnorm_optimized");
+    nvtxDomainHandle_t const domain = nvtxDomainCreateA("upgrade_guard");
+    nvtxEventAttributes_t event{};
+    event.version = NVTX_VERSION;
+    event.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    event.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    event.message.ascii = "residual_rmsnorm_optimized";
+    nvtxDomainRangePushEx(domain, &event);
     for (std::int32_t index = 0; index < 20; ++index)
     {
         if (launch(true, buffers, rows, hidden) != cudaSuccess)
         {
-            nvtxRangePop();
+            nvtxDomainRangePop(domain);
+            nvtxDomainDestroy(domain);
             return false;
         }
     }
     bool const ok = cudaOk(cudaDeviceSynchronize(), "profile synchronization");
-    nvtxRangePop();
+    nvtxDomainRangePop(domain);
+    nvtxDomainDestroy(domain);
     return ok;
 }
 
@@ -147,22 +165,62 @@ int main(int argc, char** argv)
         {
             return 1;
         }
-        float const scalar = benchmark(false, buffers, rows, hidden);
-        float const optimized = benchmark(true, buffers, rows, hidden);
-        if (!std::isfinite(scalar) || !std::isfinite(optimized) || scalar <= 0.0F)
+        std::vector<float> scalarSamples;
+        std::vector<float> optimizedSamples;
+        std::vector<float> ratios;
+        for (std::int32_t pair = 0; pair < 20; ++pair)
+        {
+            float scalar{NAN};
+            float optimized{NAN};
+            if (pair % 2 == 0)
+            {
+                scalar = benchmark(false, buffers, rows, hidden);
+                optimized = benchmark(true, buffers, rows, hidden);
+            }
+            else
+            {
+                optimized = benchmark(true, buffers, rows, hidden);
+                scalar = benchmark(false, buffers, rows, hidden);
+            }
+            if (!std::isfinite(scalar) || !std::isfinite(optimized) || scalar <= 0.0F)
+            {
+                return 1;
+            }
+            scalarSamples.push_back(scalar);
+            optimizedSamples.push_back(optimized);
+            ratios.push_back(optimized / scalar);
+        }
+        float const scalar = percentile(scalarSamples, 0.5F);
+        float const optimized = percentile(optimizedSamples, 0.5F);
+        float const ratio = percentile(ratios, 0.5F);
+        float const ratioP95 = percentile(ratios, 0.95F);
+        if (!std::isfinite(ratio) || !std::isfinite(ratioP95))
         {
             return 1;
         }
-        float const ratio = optimized / scalar;
         measuredBenefit = measuredBenefit || ratio < 0.98F;
-        noRegression = noRegression && ratio <= 1.05F;
+        noRegression = noRegression && ratioP95 <= 1.05F;
         if (index != 0)
         {
             std::cout << ',';
         }
         std::cout << "{\"hidden\":" << hidden << ",\"rows\":" << rows
                   << ",\"scalar_ms\":" << scalar << ",\"optimized_ms\":" << optimized
-                  << ",\"ratio\":" << ratio << '}';
+                  << ",\"ratio\":" << ratio << ",\"ratio_p95\":" << ratioP95
+                  << ",\"pairs\":[";
+        for (std::size_t pair = 0; pair < ratios.size(); ++pair)
+        {
+            if (pair != 0)
+            {
+                std::cout << ',';
+            }
+            std::cout << "{\"order\":\""
+                      << (pair % 2 == 0 ? "scalar_then_optimized" : "optimized_then_scalar")
+                      << "\",\"scalar_ms\":" << scalarSamples[pair]
+                      << ",\"optimized_ms\":" << optimizedSamples[pair]
+                      << ",\"ratio\":" << ratios[pair] << '}';
+        }
+        std::cout << "]}";
     }
     bool const passed = measuredBenefit && noRegression;
     std::cout << "],\"status\":\"" << (passed ? "passed" : "failed")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,8 +36,9 @@ class DockerGpuWorker:
         mounts: WorkerMounts,
         command: Sequence[str],
         timeout_seconds: float,
+        accepted_returncodes: Sequence[int] = (0,),
     ) -> CommandResult:
-        """Execute one bounded worker command and require successful completion."""
+        """Execute one bounded worker command and require an accepted completion code."""
 
         if not gpu_uuid.startswith("GPU-") or any(character.isspace() for character in gpu_uuid):
             raise InvalidInputError("selected GPU UUID is malformed")
@@ -47,13 +49,28 @@ class DockerGpuWorker:
         output = validated_mount(mounts.output, must_exist=True)
         if not command or any("\x00" in argument for argument in command):
             raise InvalidInputError("worker command must be a NUL-free argument array")
+        accepted = tuple(accepted_returncodes)
+        if (
+            not accepted
+            or len(accepted) != len(set(accepted))
+            or any(code < 0 for code in accepted)
+        ):
+            raise InvalidInputError(
+                "accepted worker return codes must be unique nonnegative values"
+            )
+        container_name = f"upgrade-guard-worker-{uuid.uuid4().hex[:12]}"
+        user_id = os.getuid()
+        group_id = os.getgid()
+        home = "/home/upgrade-guard"
         arguments = (
             "docker",
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--init",
             "--user",
-            f"{os.getuid()}:{os.getgid()}",
+            f"{user_id}:{group_id}",
             "--gpus",
             f"device={gpu_uuid}",
             "--network",
@@ -69,6 +86,11 @@ class DockerGpuWorker:
             "private",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=1073741824",  # noqa: S108
+            "--tmpfs",
+            (
+                f"{home}:rw,noexec,nosuid,nodev,size=1073741824,"
+                f"uid={user_id},gid={group_id},mode=0700"
+            ),
             "--mount",
             f"type=bind,src={source},dst=/opt/upgrade-guard,readonly",
             "--mount",
@@ -77,17 +99,41 @@ class DockerGpuWorker:
             f"type=bind,src={output},dst=/output",
             "--env",
             "PYTHONPATH=/opt/upgrade-guard/src",
+            "--env",
+            f"HOME={home}",
+            "--env",
+            f"XDG_CACHE_HOME={home}/.cache",
+            "--env",
+            f"XDG_CONFIG_HOME={home}/.config",
+            "--env",
+            f"CUDA_CACHE_PATH={home}/.cache/cuda",
+            "--entrypoint",
+            "",
             locked_image,
             *command,
         )
-        result = self.runner.run(arguments, timeout_seconds=timeout_seconds)
-        if result.returncode != 0:
-            raise InfrastructureError(
-                "isolated GPU worker command failed",
-                details={
-                    "returncode": result.returncode,
-                    "stdout": result.stdout[-4000:],
-                    "stderr": result.stderr[-4000:],
-                },
-            )
+        try:
+            result = self.runner.run(arguments, timeout_seconds=timeout_seconds)
+            if result.returncode not in accepted:
+                raise InfrastructureError(
+                    "isolated GPU worker command failed",
+                    details={
+                        "returncode": result.returncode,
+                        "accepted_returncodes": list(accepted),
+                        "stdout": result.stdout[-4000:],
+                        "stderr": result.stderr[-4000:],
+                    },
+                )
+        except BaseException:
+            self._cleanup_exact(container_name)
+            raise
         return result
+
+    def _cleanup_exact(self, container_name: str) -> None:
+        try:
+            self.runner.run(
+                ("docker", "container", "rm", "--force", container_name),
+                timeout_seconds=30,
+            )
+        except Exception:
+            return

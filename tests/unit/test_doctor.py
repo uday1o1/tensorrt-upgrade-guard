@@ -8,6 +8,7 @@ from pathlib import Path
 
 from upgrade_guard.containers.commands import CommandResult
 from upgrade_guard.doctor import doctor_exit_code, run_doctor
+from upgrade_guard.errors import InfrastructureError
 
 
 class FakeRunner:
@@ -92,6 +93,21 @@ def test_doctor_passes_supported_linux_host(monkeypatch: object) -> None:
     assert result.gpus[0].compute_capability == "8.9"
 
 
+def test_doctor_allows_cdi_only_host_for_exact_worker_probe(monkeypatch: object) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")  # type: ignore[attr-defined]
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")  # type: ignore[attr-defined]
+    results = docker_results(runtimes=("io.containerd.runc.v2", "runc"))
+    results[gpu_command()] = command_result(
+        gpu_command(),
+        stdout=(
+            "NVIDIA RTX Test, GPU-11111111-1111-1111-1111-111111111111, 8.9, 24576, 580.80.01\n"
+        ),
+    )
+    result = run_doctor(FakeRunner(results))
+    assert result.outcome == "supported"
+    assert not result.issues
+
+
 def test_doctor_fails_closed_on_macos_arm64(monkeypatch: object) -> None:
     monkeypatch.setattr("platform.system", lambda: "Darwin")  # type: ignore[attr-defined]
     monkeypatch.setattr("platform.machine", lambda: "arm64")  # type: ignore[attr-defined]
@@ -135,3 +151,23 @@ def test_doctor_rejects_invalid_gpu_output(monkeypatch: object) -> None:
     result = run_doctor(FakeRunner(results))
     assert result.outcome == "infrastructure_invalid"
     assert {issue.code for issue in result.issues} == {"NVIDIA_GPU_PROBE_INVALID"}
+
+
+def test_doctor_reports_probe_timeouts_as_typed_infrastructure(monkeypatch: object) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")  # type: ignore[attr-defined]
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")  # type: ignore[attr-defined]
+
+    class TimeoutRunner(FakeRunner):
+        def run(self, args: Sequence[str], **kwargs: object) -> CommandResult:
+            del kwargs
+            if args[0] in {"docker", "nvidia-smi"}:
+                raise InfrastructureError("command timed out")
+            return command_result(args)
+
+    result = run_doctor(TimeoutRunner({}))
+    assert result.outcome == "infrastructure_invalid"
+    assert doctor_exit_code(result) == 4
+    assert {issue.code for issue in result.issues} == {
+        "DOCKER_PROBE_TIMEOUT",
+        "NVIDIA_GPU_PROBE_TIMEOUT",
+    }

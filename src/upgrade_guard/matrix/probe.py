@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,12 +54,17 @@ class DockerWorkerProbe:
         if "," in str(script):
             raise InvalidInputError("worker probe path cannot contain a comma")
         container_name = f"upgrade-guard-probe-{uuid.uuid4().hex[:12]}"
+        user_id = os.getuid()
+        group_id = os.getgid()
+        home = "/home/upgrade-guard"
         command = (
             "docker",
             "run",
             "--rm",
             "--name",
             container_name,
+            "--user",
+            f"{user_id}:{group_id}",
             "--platform",
             "linux/amd64",
             "--gpus",
@@ -74,33 +80,46 @@ class DockerWorkerProbe:
             "256",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,nodev,size=64m",  # noqa: S108
+            "--tmpfs",
+            (f"{home}:rw,noexec,nosuid,nodev,size=64m,uid={user_id},gid={group_id},mode=0700"),
             "--mount",
             f"type=bind,source={script},target=/opt/upgrade-guard/worker_probe.py,readonly",
             "--env",
             f"UG_WORKER_MANIFEST_DIGEST={image.manifest_digest}",
+            "--env",
+            f"HOME={home}",
+            "--env",
+            f"XDG_CACHE_HOME={home}/.cache",
+            "--env",
+            f"CUDA_CACHE_PATH={home}/.cache/cuda",
+            "--entrypoint",
+            "",
             canonical,
             "python3",
             "/opt/upgrade-guard/worker_probe.py",
         )
-        result = self.runner.run(command, timeout_seconds=300)
-        if result.returncode != 0:
-            self._cleanup_exact(container_name)
-            raise InfrastructureError(
-                "worker probe container failed",
-                details={
-                    "image": canonical,
-                    "command_sha256": command_sha256(command),
-                    "error": _bounded(result.stderr, result.stdout),
-                },
-            )
         try:
+            result = self.runner.run(command, timeout_seconds=300)
+            if result.returncode != 0:
+                raise InfrastructureError(
+                    "worker probe container failed",
+                    details={
+                        "image": canonical,
+                        "command_sha256": command_sha256(command),
+                        "error": _bounded(result.stderr, result.stdout),
+                    },
+                )
             payload: Any = json.loads(result.stdout)
             probe = WorkerProbe.model_validate(payload)
         except (json.JSONDecodeError, ValidationError) as error:
+            self._cleanup_exact(container_name)
             raise InfrastructureError(
                 "worker probe returned an invalid document",
                 details={"image": canonical, "reason": str(error)},
             ) from error
+        except BaseException:
+            self._cleanup_exact(container_name)
+            raise
         return ProbeExecution(
             probe=probe,
             command_sha256=command_sha256(command),
@@ -139,10 +158,13 @@ class DockerWorkerProbe:
             )
 
     def _cleanup_exact(self, container_name: str) -> None:
-        self.runner.run(
-            ("docker", "container", "rm", "--force", container_name),
-            timeout_seconds=30,
-        )
+        try:
+            self.runner.run(
+                ("docker", "container", "rm", "--force", container_name),
+                timeout_seconds=30,
+            )
+        except Exception:
+            return
 
 
 def _bounded(*values: str) -> str:

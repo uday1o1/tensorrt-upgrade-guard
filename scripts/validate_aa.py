@@ -15,22 +15,24 @@ from upgrade_guard.compare.performance import (
 from upgrade_guard.worker.trtexec import load_exported_times
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pairs", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args()
+def validate_aa(pairs_directory: Path) -> dict[str, object]:
+    """Return fail-closed A/A evidence for one complete pilot directory."""
+
     pairs = []
     raw = []
-    for directory in sorted(arguments.pairs.glob("pair-*")):
+    for directory in sorted(pairs_directory.glob("pair-*")):
         first = load_exported_times(directory / "a.json")
         second = load_exported_times(directory / "b.json")
+        validity = json.loads((directory / "validity.json").read_text(encoding="utf-8"))
+        if validity.get("status") != "passed":
+            raise RuntimeError(f"A/A pair retained invalid hardware evidence: {directory}")
         pairs.append(AcceptedPair(first.median_milliseconds, second.median_milliseconds))
         raw.append(
             {
                 "pair": directory.name,
                 "a_median_milliseconds": first.median_milliseconds,
                 "b_median_milliseconds": second.median_milliseconds,
+                "hardware_validity": validity,
             }
         )
     accepted = tuple(pairs)
@@ -46,15 +48,15 @@ def main() -> None:
         for pair in accepted
         for value in (pair.baseline_milliseconds, pair.candidate_milliseconds)
     )
-    false_positive = gate.outcome is GateOutcome.REGRESSION
-    payload = {
+    passed = gate.outcome is GateOutcome.PASSED and len(accepted) >= 20
+    return {
         "schema_version": "upgradeguard.dev/aa-pilot/v1",
-        "status": "failed" if false_positive else "passed",
+        "status": "passed" if passed else "failed",
         "profiled": False,
         "accepted_pairs": len(accepted),
         "coefficient_of_variation": coefficient_of_variation(medians),
         "empirical_minimum_detectable_effect": max(0.0, gate.one_sided_upper - 1.0),
-        "false_positive": false_positive,
+        "false_positive": gate.outcome is GateOutcome.REGRESSION,
         "gate": {
             "point": gate.point,
             "one_sided_lower": gate.one_sided_lower,
@@ -63,11 +65,19 @@ def main() -> None:
         },
         "pairs": raw,
     }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pairs", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    arguments = parser.parse_args()
+    payload = validate_aa(arguments.pairs)
     arguments.output.write_text(
         json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    if false_positive or len(accepted) < 20:
+    if payload["status"] != "passed":
         raise SystemExit(1)
 
 

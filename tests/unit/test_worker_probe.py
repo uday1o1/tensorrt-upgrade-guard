@@ -59,7 +59,7 @@ def test_tool_and_trtexec_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda args: (0, "usage: trtexec --onnx=model --shapes=input:1x8"),
     )
     trtexec = worker_probe._trtexec()
-    assert trtexec["options"] == ["onnx", "shapes"]
+    assert trtexec["options"] == ["--onnx", "--shapes"]
     assert trtexec["help_sha256"].startswith("sha256:")
 
 

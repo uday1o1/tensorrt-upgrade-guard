@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tarfile
 import zipfile
 from dataclasses import replace
@@ -10,13 +11,22 @@ from pathlib import Path
 
 import pytest
 
-from tests.factories import digest, failure_record
+from tests.factories import digest, environment_lock, failure_record
+from upgrade_guard.containers.commands import CommandResult
+from upgrade_guard.containers.runtime import WorkerMounts
 from upgrade_guard.contracts.base import sha256_bytes
 from upgrade_guard.contracts.bundle import BundleManifest, SourceBuildRequest
 from upgrade_guard.contracts.common import ArtifactReference
 from upgrade_guard.errors import InvalidInputError, UnsupportedEnvironmentError
 from upgrade_guard.reproduce.bundle import BundleExport, export_bundle
-from upgrade_guard.reproduce.run import prepare_replay, require_gpu_for_replay
+from upgrade_guard.reproduce.run import (
+    ReplayRecipe,
+    ReplayStep,
+    _validate_step_evidence,
+    execute_replay,
+    prepare_replay,
+    require_gpu_for_replay,
+)
 from upgrade_guard.reproduce.verify import materialize_verified_bundle, verify_bundle
 
 
@@ -279,6 +289,186 @@ def test_exported_bundle_verifies_and_materializes_into_clean_directory(tmp_path
             trust_source_code=False,
             trust_included_engine=False,
         )
+
+
+def test_typed_replay_rebuilds_and_confirms_expected_failure(tmp_path: Path) -> None:
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    environment = environment_lock()
+    (sources / "baseline.json").write_text(
+        environment.model_copy(update={"id": "baseline"}).model_dump_json(), encoding="utf-8"
+    )
+    (sources / "candidate.json").write_text(environment.model_dump_json(), encoding="utf-8")
+    (sources / "qualification.yaml").write_text("kind: Qualification\n", encoding="utf-8")
+    (sources / "model.onnx").write_bytes(b"model")
+    (sources / "input.npy").write_bytes(b"input")
+    (sources / "worker.py").write_text("# reviewed source\n", encoding="utf-8")
+    build_command = ("python3", "-m", "worker", "build")
+    recipe = {
+        "schema_version": "upgradeguard.dev/replay-recipe/v1",
+        "expected_failure_code": "NUMERICAL_REGRESSION",
+        "steps": [
+            {
+                "id": "build-engine",
+                "command": list(build_command),
+                "result_file": "build.json",
+                "expected_result_status": "passed",
+            },
+            {
+                "id": "seeded-failure",
+                "command": ["python3", "-m", "worker", "fail"],
+                "accepted_returncodes": [1],
+                "result_file": "failure.json",
+                "expected_result_status": "failed",
+                "result_message_contains": "intended numerical failure",
+                "stdout_json_equals": {"detected": True, "control": "passed"},
+            },
+        ],
+    }
+    (sources / "replay.json").write_text(json.dumps(recipe), encoding="utf-8")
+    bundle = tmp_path / "bundle"
+    export_bundle(
+        BundleExport(
+            id="typed-replay",
+            created_at=datetime(2026, 8, 13, tzinfo=UTC),
+            baseline_environment=sources / "baseline.json",
+            candidate_environment=sources / "candidate.json",
+            qualification=sources / "qualification.yaml",
+            model=sources / "model.onnx",
+            inputs=(sources / "input.npy",),
+            expected_failure=failure_record(),
+            extra_files={"commands/replay.json": sources / "replay.json"},
+            source_files={"worker.py": sources / "worker.py"},
+            worker_image_manifest_digest=environment.worker_image.manifest_digest,
+            selected_gpu_uuid=environment.probe.gpu.uuid,
+            source_build_command=build_command,
+        ),
+        bundle,
+    )
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+
+        def run(
+            self,
+            *,
+            image: str,
+            gpu_uuid: str,
+            mounts: WorkerMounts,
+            command: tuple[str, ...],
+            timeout_seconds: float,
+            accepted_returncodes: tuple[int, ...] = (0,),
+        ) -> CommandResult:
+            del image, gpu_uuid, timeout_seconds
+            self.calls.append((command, accepted_returncodes))
+            if len(self.calls) == 1:
+                (mounts.output / "build.json").write_text('{"status":"passed"}')
+                return CommandResult(command, 0, "", "", 0.1)
+            (mounts.output / "failure.json").write_text(
+                '{"status":"failed","message":"intended numerical failure"}'
+            )
+            return CommandResult(command, 1, '{"detected":true,"control":"passed"}', "", 0.2)
+
+    worker = FakeWorker()
+    replay = execute_replay(
+        bundle,
+        tmp_path / "replay",
+        trust_source_code=True,
+        trust_included_engine=False,
+        worker=worker,  # type: ignore[arg-type]
+    )
+    assert replay.status == "passed"
+    assert replay.expected_failure_code == "NUMERICAL_REGRESSION"
+    assert replay.step_results == ("build-engine", "seeded-failure")
+    assert worker.calls[1][1] == (1,)
+    assert (
+        json.loads((tmp_path / "replay" / "replay-result.json").read_text())[
+            "bundle_manifest_sha256"
+        ]
+        == replay.bundle_manifest_sha256
+    )
+    assert "--trust-source-code" in (bundle / "README.md").read_text()
+
+    with pytest.raises(InvalidInputError, match="overwrite"):
+        execute_replay(
+            bundle,
+            tmp_path / "replay",
+            trust_source_code=True,
+            trust_included_engine=False,
+            worker=worker,  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(InvalidInputError, match="outside"):
+        execute_replay(
+            bundle,
+            bundle / "replay",
+            trust_source_code=True,
+            trust_included_engine=False,
+            worker=worker,  # type: ignore[arg-type]
+        )
+
+
+def test_replay_recipe_and_evidence_fail_closed(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="argument arrays"):
+        ReplayStep(id="empty", command=())
+    with pytest.raises(ValueError, match="return codes"):
+        ReplayStep(id="codes", command=("true",), accepted_returncodes=())
+    with pytest.raises(ValueError, match="authored together"):
+        ReplayStep(id="result", command=("true",), result_file="result.json")
+    with pytest.raises(ValueError, match="requires result_file"):
+        ReplayStep(id="message", command=("true",), result_message_contains="reason")
+    with pytest.raises(ValueError, match="safe relative"):
+        ReplayStep(
+            id="escape",
+            command=("true",),
+            result_file="../result.json",
+            expected_result_status="passed",
+        )
+    duplicate = ReplayStep(id="same", command=("true",))
+    with pytest.raises(ValueError, match="unique"):
+        ReplayRecipe(
+            schema_version="upgradeguard.dev/replay-recipe/v1",
+            expected_failure_code="PROFILE_REJECTED",
+            steps=(duplicate, duplicate),
+        )
+
+    work = tmp_path / "work"
+    work.mkdir()
+    result_step = ReplayStep(
+        id="result-status",
+        command=("true",),
+        result_file="result.json",
+        expected_result_status="failed",
+        result_message_contains="intended reason",
+    )
+    with pytest.raises(InvalidInputError, match="did not produce"):
+        _validate_step_evidence(result_step, "", work)
+    (work / "result.json").write_text('{"status":"passed"}')
+    with pytest.raises(InvalidInputError, match="status differed"):
+        _validate_step_evidence(result_step, "", work)
+    (work / "result.json").write_text('{"status":"failed","message":"other"}')
+    with pytest.raises(InvalidInputError, match="different reason"):
+        _validate_step_evidence(result_step, "", work)
+    (work / "result.json").write_text(
+        '{"status":"failed","message":"the intended reason was observed"}'
+    )
+    _validate_step_evidence(result_step, "", work)
+
+    stdout_step = ReplayStep(
+        id="stdout",
+        command=("true",),
+        stdout_json_equals={"nested.detected": True},
+    )
+    with pytest.raises(InvalidInputError, match="valid JSON"):
+        _validate_step_evidence(stdout_step, "not-json", work)
+    with pytest.raises(InvalidInputError, match="JSON object"):
+        _validate_step_evidence(stdout_step, "[]", work)
+    with pytest.raises(InvalidInputError, match="lacks"):
+        _validate_step_evidence(stdout_step, '{"nested":{}}', work)
+    with pytest.raises(InvalidInputError, match="predicate differed"):
+        _validate_step_evidence(stdout_step, '{"nested":{"detected":false}}', work)
+    _validate_step_evidence(stdout_step, '{"nested":{"detected":true}}', work)
 
 
 def test_export_rejects_source_metadata_without_sources(tmp_path: Path) -> None:

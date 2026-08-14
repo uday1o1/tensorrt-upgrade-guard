@@ -1,0 +1,5 @@
+**
+!.dockerignore
+!containers/
+!containers/Dockerfile.worker
+!containers/requirements-worker.txt

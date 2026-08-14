@@ -1,4 +1,4 @@
-"""Public CLI behavior on a host without NVIDIA software."""
+"""Public CLI behavior without importing NVIDIA Python software."""
 
 from __future__ import annotations
 
@@ -16,23 +16,30 @@ from upgrade_guard.contracts.environment import PlatformIdentity, ResolvedImage
 from upgrade_guard.errors import FailureCode, InvalidInputError, UnsupportedEnvironmentError
 from upgrade_guard.qualification import QualificationOutcome
 from upgrade_guard.report.model import build_report_model
-from upgrade_guard.reproduce.run import ReplayPlan
+from upgrade_guard.reproduce.run import ReplayResult
 
 runner = CliRunner()
 
 
-def test_doctor_json_fails_closed_on_local_non_nvidia_host() -> None:
+def test_doctor_json_reports_an_injected_supported_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("upgrade_guard.cli.run_doctor", supported_doctor)
     result = runner.invoke(app, ["doctor", "--json"])
-    assert result.exit_code in {3, 4}
     payload = json.loads(result.stdout)
     assert payload["schema_version"] == "upgradeguard.dev/doctor/v1"
-    assert payload["outcome"] in {"unsupported", "infrastructure_invalid"}
-    assert payload["issues"]
+    assert result.exit_code == 0
+    assert payload["outcome"] == "supported"
+    assert payload["docker"]["available"] is True
+    assert payload["gpus"]
+    assert not payload["issues"]
     assert "tensorrt" not in sys.modules
     assert "cuda" not in sys.modules
 
 
-def test_matrix_lock_stops_at_preflight_and_creates_no_lock(tmp_path: Path) -> None:
+def test_matrix_lock_stops_at_injected_preflight_and_creates_no_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     matrix = tmp_path / "matrix.yaml"
     matrix.write_text(
         """
@@ -50,14 +57,21 @@ environments:
         encoding="utf-8",
     )
     output = tmp_path / "matrix.lock.json"
+
+    class UnsupportedLocker:
+        def lock(self, matrix: Path, output: Path) -> FakeLock:
+            del matrix, output
+            raise UnsupportedEnvironmentError("GPU unavailable")
+
+    monkeypatch.setattr("upgrade_guard.cli.MatrixLocker", UnsupportedLocker)
     result = runner.invoke(
         app,
         ["matrix", "lock", str(matrix), "--out", str(output), "--json"],
     )
-    assert result.exit_code in {3, 4}
+    assert result.exit_code == 3
     payload = json.loads(result.stdout)
     assert payload["schema_version"] == "upgradeguard.dev/error/v1"
-    assert payload["error_code"] in {"PREFLIGHT_UNSUPPORTED", "INFRASTRUCTURE_INVALID"}
+    assert payload["error_code"] == "PREFLIGHT_UNSUPPORTED"
     assert not output.exists()
 
 
@@ -239,6 +253,38 @@ def test_qualify_and_compare_cli_statuses(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert json.loads(machine.stdout)["status"] == "passed"
 
 
+@pytest.mark.parametrize(
+    ("status", "failure_codes", "exit_code"),
+    [
+        ("passed", [], 0),
+        ("failed", ["NUMERICAL_REGRESSION"], 1),
+        ("inconclusive", ["INCONCLUSIVE"], 4),
+        ("infrastructure_invalid", ["INFRASTRUCTURE_INVALID"], 4),
+    ],
+)
+def test_compare_preserves_stored_status_exit_semantics(
+    tmp_path: Path,
+    status: str,
+    failure_codes: list[str],
+    exit_code: int,
+) -> None:
+    run = tmp_path / status
+    run.mkdir()
+    (run / "qualification-summary.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "upgradeguard.dev/qualification-summary/v1",
+                "status": status,
+                "failure_codes": failure_codes,
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["compare", str(run), "--json"])
+    assert result.exit_code == exit_code
+    assert json.loads(result.stdout)["status"] == status
+
+
 def test_report_and_reproduce_verify_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     report_directory = tmp_path / "run"
     report_directory.mkdir()
@@ -329,7 +375,7 @@ def test_cli_expected_errors_and_reduction(monkeypatch: pytest.MonkeyPatch, tmp_
     assert "Reduced PROFILE_REJECTED evidence" in reduced.stdout
 
 
-def test_cli_human_resolver_and_replay_boundary(
+def test_cli_human_resolver_and_typed_replay_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("upgrade_guard.cli.RegistryClient", FakeRegistryClient)
@@ -340,15 +386,27 @@ def test_cli_human_resolver_and_replay_boundary(
 
     bundle = tmp_path / "bundle.zip"
     bundle.write_bytes(b"fixture")
-    replay = ReplayPlan("bundle", None, (), (), (), False)
-    monkeypatch.setattr("upgrade_guard.cli.prepare_replay", lambda *args, **kwargs: replay)
-    monkeypatch.setattr(
-        "upgrade_guard.cli.require_gpu_for_replay",
-        lambda: (_ for _ in ()).throw(UnsupportedEnvironmentError("GPU required")),
+    replay = ReplayResult(
+        schema_version="upgradeguard.dev/replay-result/v1",
+        status="passed",
+        bundle_id="bundle",
+        bundle_manifest_sha256=digest("b"),
+        worker_image="registry.example/worker@" + digest("c"),
+        selected_gpu_uuid="GPU-11111111-1111-1111-1111-111111111111",
+        expected_failure_code="PROFILE_REJECTED",
+        step_results=("build-engine", "seeded-failure"),
     )
+    monkeypatch.setattr("upgrade_guard.cli.execute_replay", lambda *args, **kwargs: replay)
     result = runner.invoke(
         app,
         ["reproduce", "run", str(bundle), "--out", str(tmp_path / "replay"), "--json"],
     )
-    assert result.exit_code == 3
-    assert json.loads(result.stdout)["message"] == "GPU required"
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["expected_failure_code"] == "PROFILE_REJECTED"
+    human = runner.invoke(
+        app,
+        ["reproduce", "run", str(bundle), "--out", str(tmp_path / "human-replay")],
+    )
+    assert human.exit_code == 0
+    assert "Reproduced PROFILE_REJECTED: bundle" in human.stdout
+    assert "replay-result.json" in human.stdout

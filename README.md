@@ -117,6 +117,8 @@ upgrade-guard report RUN_DIR --format text|json|html
 
 `reproduce verify` checks paths, file types, sizes, hashes, inventory, and the manifest self-hash.
 `reproduce run` never executes the bundle's `reproduce.sh` file.
+It rebuilds the engine and evaluates clean-control and expected-failure predicates from the hash-verified typed replay recipe.
+The replay output must be a new directory outside a directory-form bundle.
 
 ## Evidence and reports
 

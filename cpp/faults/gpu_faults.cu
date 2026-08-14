@@ -101,7 +101,13 @@ NumericalSeed numericalSeed()
     return {faultDetected && controlPassed, observedFault, reference};
 }
 
-bool nonfiniteSeed()
+struct NonfiniteSeed
+{
+    bool detected;
+    bool controlPassed;
+};
+
+NonfiniteSeed nonfiniteSeed()
 {
     std::vector<float> zeros(32, 0.0F);
     float* input{nullptr};
@@ -119,9 +125,34 @@ bool nonfiniteSeed()
     }
     bool const detected = ok
         && std::all_of(zeros.begin(), zeros.end(), [](float value) { return !std::isfinite(value); });
+    std::vector<float> gamma(zeros.size(), 1.0F);
+    float* residual{nullptr};
+    float* deviceGamma{nullptr};
+    bool controlOk = cudaMalloc(&residual, zeros.size() * sizeof(float)) == cudaSuccess
+        && cudaMalloc(&deviceGamma, gamma.size() * sizeof(float)) == cudaSuccess
+        && cudaMemset(residual, 0, zeros.size() * sizeof(float)) == cudaSuccess
+        && cudaMemcpy(deviceGamma, gamma.data(), gamma.size() * sizeof(float),
+               cudaMemcpyHostToDevice)
+            == cudaSuccess;
+    if (controlOk)
+    {
+        controlOk = upgrade_guard::launchResidualRmsNormScalar(nvinfer1::DataType::kFLOAT,
+                        input, residual, deviceGamma, output, 1,
+                        static_cast<std::int32_t>(zeros.size()), 1e-5F, nullptr)
+                == cudaSuccess
+            && cudaDeviceSynchronize() == cudaSuccess
+            && cudaMemcpy(zeros.data(), output, zeros.size() * sizeof(float),
+                   cudaMemcpyDeviceToHost)
+                == cudaSuccess;
+    }
+    bool const controlPassed = controlOk
+        && std::all_of(zeros.begin(), zeros.end(),
+            [](float value) { return std::isfinite(value) && value == 0.0F; });
+    cudaFree(deviceGamma);
+    cudaFree(residual);
     cudaFree(output);
     cudaFree(input);
-    return detected;
+    return {detected, controlPassed};
 }
 
 float timeIdentity(float* input, float* output, bool delay)
@@ -182,7 +213,7 @@ PerformanceSeed performanceSeed()
 int main()
 {
     NumericalSeed const numerical = numericalSeed();
-    bool const nonfinite = nonfiniteSeed();
+    NonfiniteSeed const nonfinite = nonfiniteSeed();
     PerformanceSeed const performanceSeedResult = performanceSeed();
     float const ratio = performanceSeedResult.ratio;
     bool const performance
@@ -194,9 +225,10 @@ int main()
               << ",\"control\":\"passed\",\"observed\":" << numerical.observed
               << ",\"reference\":" << numerical.reference << "},"
               << "\"G3\":{\"expected\":\"NONFINITE_OUTPUT\",\"detected\":"
-              << (nonfinite ? "true" : "false") << ",\"control\":\"passed\"},"
+              << (nonfinite.detected ? "true" : "false") << ",\"control\":\""
+              << (nonfinite.controlPassed ? "passed" : "failed") << "\"},"
               << "\"G5\":{\"expected\":\"PERFORMANCE_REGRESSION\",\"detected\":"
               << (performance ? "true" : "false") << ",\"ratio\":" << ratio
               << ",\"control\":\"passed\"}}\n";
-    return numerical.passed && nonfinite && performance ? 0 : 1;
+    return numerical.passed && nonfinite.detected && nonfinite.controlPassed && performance ? 0 : 1;
 }

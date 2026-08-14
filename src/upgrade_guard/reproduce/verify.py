@@ -32,6 +32,7 @@ ALLOWED_SUFFIXES = frozenset(
         ".npy",
         ".npz",
         ".plan",
+        ".py",
         ".cpp",
         ".cu",
         ".cuh",
