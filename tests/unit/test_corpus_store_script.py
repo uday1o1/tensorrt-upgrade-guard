@@ -101,10 +101,22 @@ def test_corpus_index_binds_lock_materializer_and_inventory(tmp_path: Path) -> N
         path = project / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative, encoding="utf-8")
-    document = materializer_document(project, "core")
+    reference_environment_sha256 = "sha256:" + ("e" * 64)
+    document = materializer_document(
+        project,
+        "core",
+        reference_environment_sha256,
+    )
     root = project / ".upgrade-guard/corpora/by-id/core/identity"
     root.mkdir(parents=True)
-    (root / "corpus.lock.json").write_text("{}\n", encoding="utf-8")
+    (root / "corpus.lock.json").write_text(
+        json.dumps(
+            {"reference_environment_sha256": reference_environment_sha256},
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     write_sidecar(root, document)
     value = corpus_index(project, {"core": root})
     entry = value["corpora"]["core"]
@@ -112,3 +124,5 @@ def test_corpus_index_binds_lock_materializer_and_inventory(tmp_path: Path) -> N
     assert entry["materializer_sha256"] == document["materializer_sha256"]
     assert entry["lock_sha256"].startswith("sha256:")
     assert entry["inventory_sha256"].startswith("sha256:")
+    assert entry["reference_environment_sha256"] == reference_environment_sha256
+    assert value["reference_environment_sha256"] == reference_environment_sha256

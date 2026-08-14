@@ -23,8 +23,12 @@ The runner refuses tracked or untracked source-tree changes because the evidence
 ## Run the workflow
 
 ```bash
-bash scripts/run_cuda_pm_qualification.sh
+run_root=".upgrade-guard/cuda-pm/runs/$(git rev-parse HEAD)"
+uv run --frozen upgrade-guard qualify qualification/full.yaml \
+  --project-root . --out "${run_root}"
 ```
+
+The public command invokes the checked-in resumable runner without shell interpolation.
 
 The command creates `.upgrade-guard/cuda-pm/runs/<commit>` for logs, builds, run data, reports, profiles, SBOMs, and completion markers.
 Generated corpora are published once under `.upgrade-guard/corpora/by-id/<kind>/<materializer-hash>` and referenced by a source-run corpus index.
@@ -36,7 +40,8 @@ One process-wide file lock prevents two qualification invocations from racing th
 Fix the reported external prerequisite or implementation defect, keep the same source revision when appropriate, and run the same command again.
 
 ```bash
-bash scripts/run_cuda_pm_qualification.sh
+uv run --frozen upgrade-guard qualify qualification/full.yaml \
+  --project-root . --out "${run_root}"
 ```
 
 The runner skips only a step whose versioned marker, complete file inventory, selected GPU, mode, source commit, direct dependency markers, matrix lock, and corpus identities all verify.
@@ -44,6 +49,15 @@ Invalid or incomplete owned outputs move under the source run's `stale/` lineage
 Successful G2 and G7 clean replays have independent markers, so an interruption after G2 does not repeat it.
 
 The local failure diagnostic under `diagnostics/` reports the failed step, stable classification, safe log pointers, and the same resume command without copying log contents or environment variables.
+
+When the diagnostic is `NVIDIA_CONTAINER_TOOLKIT_UNAVAILABLE`, the missing operation requires an administrator.
+
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+After that change, rerun the same public qualification command.
 
 ## Select a GPU
 

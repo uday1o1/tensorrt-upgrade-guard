@@ -20,8 +20,16 @@ elif [[ "${SANITIZER_ONLY}" == "1" ]]; then
   RUN_MODE="sanitizer"
   STATE_ROOT="${STATE_BASE}/checks/${SOURCE_ID}/sanitizer"
 fi
+if [[ -n "${UG_STATE_ROOT:-}" ]]; then
+  if [[ "${RUN_MODE}" != "full" || "${UG_STATE_ROOT}" != /* ]]; then
+    printf 'UG_STATE_ROOT requires full mode and an absolute path.\n' >&2
+    exit 2
+  fi
+  STATE_ROOT="${UG_STATE_ROOT}"
+fi
 LOG_ROOT="${STATE_ROOT}/logs"
 MATRIX_LOCK="${STATE_ROOT}/matrix.lock.json"
+REFERENCE_LOCK="${STATE_ROOT}/reference-environment.lock.json"
 CORPUS_STORE="${PROJECT_ROOT}/.upgrade-guard/corpora/by-id"
 CORE_CORPUS=""
 PLUGIN_CORPUS=""
@@ -30,12 +38,22 @@ REGISTRY_NAME="tensorrt-upgrade-guard-registry-${SOURCE_ID:0:12}"
 REGISTRY_VOLUME="${REGISTRY_NAME}-data"
 REGISTRY_ADDRESS="127.0.0.1:5500"
 REGISTRY_IMAGE="registry@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278"
-BASELINE_BASE="nvcr.io/nvidia/tensorrt:26.06-py3@sha256:2a5a0a9a32ec5ddc1c384c15ddcf3b89ddc4f8647e7ee7ae708d844210183a1e"
-CANDIDATE_BASE="nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a"
+REFERENCE_BASE="docker.io/library/python:3.12.13-slim-bookworm@sha256:6e13e65c55e33adf203d77ee371cf8bf5d81bd4902ef07565721f46bf44917af"
+REFERENCE_BASE_MANIFEST="sha256:6e13e65c55e33adf203d77ee371cf8bf5d81bd4902ef07565721f46bf44917af"
+REFERENCE_IMAGE="${REGISTRY_ADDRESS}/upgrade-guard/reference:onnxruntime-cpu"
+MATRIX_TEMPLATE="${UG_MATRIX_TEMPLATE:-${PROJECT_ROOT}/matrices/examples/controlled-minor.yaml}"
+QUALIFICATION_TEMPLATE="${UG_QUALIFICATION_SPEC:-${PROJECT_ROOT}/qualification/full.yaml}"
+BASELINE_BASE=""
+CANDIDATE_BASE=""
+BASELINE_BASE_MANIFEST=""
+CANDIDATE_BASE_MANIFEST=""
 GPU_INDEX="${UG_GPU_INDEX:-0}"
 CURRENT_STEP="initialization"
 THROUGH_STEP="${UG_THROUGH_STEP:-}"
 GPU_UUID=""
+QUALIFICATION_FAILURE_STEP=""
+QUALIFICATION_FAILURE_REPORTED=0
+EXTENDED_WORKER_DOMAIN_FAILURE=0
 
 DONE_ROOT="${STATE_ROOT}/done"
 
@@ -56,7 +74,7 @@ failure_report() {
     bounded_run cleanup docker container rm --force "${REGISTRY_NAME}" \
       >/dev/null 2>&1 || true
   fi
-  if [[ ${exit_code} -ne 0 ]]; then
+  if [[ ${exit_code} -ne 0 && ${QUALIFICATION_FAILURE_REPORTED} -ne 1 ]]; then
     local classification=auto
     local diagnostic_arguments=(
       --state "${STATE_ROOT}" --step "${CURRENT_STEP}" --exit-code "${exit_code}"
@@ -77,6 +95,8 @@ failure_report() {
       >/dev/null 2>&1 || true
     printf 'FAILED step=%s exit=%s\n' "${CURRENT_STEP}" "${exit_code}" >&2
     printf 'Resume with: bash scripts/run_cuda_pm_qualification.sh\n' >&2
+  elif [[ ${exit_code} -eq 1 ]]; then
+    printf 'QUALIFICATION_FAILED report=%s\n' "${STATE_ROOT}/report.md" >&2
   fi
   exit "${exit_code}"
 }
@@ -88,9 +108,23 @@ run_step() {
   CURRENT_STEP="${name}"
   if bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py verify \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step "${name}" \
-    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"; then
+    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}" \
+    --qualification-spec "${QUALIFICATION_TEMPLATE}"; then
     printf 'SKIP completed step: %s\n' "${name}"
-    if [[ "${THROUGH_STEP}" == "${name}" ]]; then
+    local skipped_status=0
+    if inspect_step_outcome "${name}"; then
+      skipped_status=0
+    else
+      skipped_status=$?
+    fi
+    if [[ ${skipped_status} -eq 1 ]] && is_domain_step "${name}"; then
+      QUALIFICATION_FAILURE_STEP="${name}"
+    elif [[ ${skipped_status} -eq 1 && ${name} == "final-evidence" ]]; then
+      :
+    elif [[ ${skipped_status} -ne 0 ]]; then
+      return "${skipped_status}"
+    fi
+    if [[ "${THROUGH_STEP}" == "${name}" && -z "${QUALIFICATION_FAILURE_STEP}" ]]; then
       exit 0
     fi
     return
@@ -99,13 +133,50 @@ run_step() {
     printf 'RERUN invalid or incomplete step: %s\n' "${name}"
   fi
   printf 'RUN step: %s\n' "${name}"
+  set +e
   "$@" 2>&1 | tee "${LOG_ROOT}/${name}.log"
+  local command_status=${PIPESTATUS[0]}
+  set -e
+  local outcome_status=0
+  if is_domain_step "${name}"; then
+    if inspect_step_outcome "${name}"; then
+      outcome_status=0
+    else
+      outcome_status=$?
+    fi
+    if [[ ${command_status} -eq 0 && ${outcome_status} -ne 0 ]] \
+      || [[ ${command_status} -eq 1 && ${outcome_status} -ne 1 ]]; then
+      printf 'Qualification command and typed outcome disagree for %s.\n' "${name}" >&2
+      return 4
+    fi
+  fi
+  if [[ ${command_status} -ne 0 ]]; then
+    if [[ ${command_status} -ne 1 || ${outcome_status} -ne 1 ]]; then
+      return "${command_status}"
+    fi
+  fi
   bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step "${name}" \
-    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
-  if [[ "${THROUGH_STEP}" == "${name}" ]]; then
+    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}" \
+    --qualification-spec "${QUALIFICATION_TEMPLATE}"
+  if [[ ${outcome_status} -eq 1 ]]; then
+    QUALIFICATION_FAILURE_STEP="${name}"
+  fi
+  if [[ "${THROUGH_STEP}" == "${name}" && -z "${QUALIFICATION_FAILURE_STEP}" ]]; then
     exit 0
   fi
+}
+
+is_domain_step() {
+  [[ "$1" == "core-qualification" || "$1" == "plugin-matrix" \
+    || "$1" == "mobilenet-matrix" ]]
+}
+
+inspect_step_outcome() {
+  bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py \
+    inspect-outcome --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step "$1" \
+    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}" \
+    --qualification-spec "${QUALIFICATION_TEMPLATE}"
 }
 
 run_always_step() {
@@ -118,40 +189,96 @@ run_always_step() {
     > "${LOG_ROOT}/${name}.log"
   bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step "${name}" \
-    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
+    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}" \
+    --qualification-spec "${QUALIFICATION_TEMPLATE}"
   if [[ "${THROUGH_STEP}" == "${name}" ]]; then
     exit 0
   fi
 }
 
+invocation_guard_failure() {
+  local exit_code=$1
+  local reason=$2
+  local detail=$3
+  local output="${STATE_ROOT}/diagnostics/invocation-guard.json"
+  mkdir -p "${output%/*}"
+  INVOCATION_GUARD_OUTPUT="${output}" INVOCATION_GUARD_REASON="${reason}" \
+    INVOCATION_GUARD_DETAIL="${detail}" INVOCATION_GUARD_EXIT_CODE="${exit_code}" \
+    python3 -c \
+    'import json,os,tempfile; from pathlib import Path; out=Path(os.environ["INVOCATION_GUARD_OUTPUT"]); value={"schema_version":"upgradeguard.dev/invocation-guard/v1","status":"unsupported" if os.environ["INVOCATION_GUARD_EXIT_CODE"]=="3" else "infrastructure_invalid","reason":os.environ["INVOCATION_GUARD_REASON"],"detail":os.environ["INVOCATION_GUARD_DETAIL"],"exit_code":int(os.environ["INVOCATION_GUARD_EXIT_CODE"])}; handle=tempfile.NamedTemporaryFile("w",dir=out.parent,prefix=f".{out.name}.",delete=False); json.dump(value,handle,indent=2,sort_keys=True); handle.write("\n"); handle.flush(); os.fsync(handle.fileno()); handle.close(); Path(handle.name).replace(out)'
+  printf 'Invocation guard failed: %s (%s)\n' "${reason}" "${detail}" >&2
+  return 0
+}
+
 invocation_guard() {
   cd "${PROJECT_ROOT}"
-  [[ "$(git rev-parse HEAD)" == "${SOURCE_ID}" ]]
-  [[ -z "$(git status --porcelain --untracked-files=normal)" ]]
-  [[ "$(uname -s)" == "Linux" ]]
-  [[ "$(uname -m)" == "x86_64" ]]
-  command -v python3
-  command -v docker
-  command -v nvidia-smi
-  command -v curl
-  command -v timeout
-  local docker_platform
-  bounded_run quick docker version >/dev/null
-  docker_platform="$(bounded_run quick docker info --format '{{.OSType}}/{{.Architecture}}')"
-  [[ "${docker_platform}" == "linux/x86_64" || "${docker_platform}" == "linux/amd64" ]]
-  if [[ -n "${UG_EXPECTED_GPU_UUID:-}" ]]; then
-    GPU_UUID="$(bounded_run preflight nvidia-smi --id="${UG_EXPECTED_GPU_UUID}" \
-      --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]')"
-    [[ "${GPU_UUID}" == "${UG_EXPECTED_GPU_UUID}" ]]
-  else
-    GPU_UUID="$(bounded_run preflight nvidia-smi --id="${GPU_INDEX}" \
-      --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]')"
+  if [[ "$(git rev-parse HEAD)" != "${SOURCE_ID}" ]] \
+    || [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+    invocation_guard_failure 2 SOURCE_STATE_INVALID \
+      "the checkout commit or clean-worktree identity changed"
+    return 2
   fi
-  [[ "${GPU_UUID}" == GPU-* ]]
+  local host_system host_architecture
+  host_system="$(uname -s)"
+  host_architecture="$(uname -m)"
+  if [[ "${host_system}" != "Linux" ]]; then
+    invocation_guard_failure 3 HOST_OS_UNSUPPORTED \
+      "required Linux, observed ${host_system}"
+    return 3
+  fi
+  if [[ "${host_architecture}" != "x86_64" ]]; then
+    invocation_guard_failure 3 HOST_ARCHITECTURE_UNSUPPORTED \
+      "required x86_64, observed ${host_architecture}"
+    return 3
+  fi
+  local required_command
+  for required_command in python3 docker nvidia-smi curl timeout; do
+    if ! command -v "${required_command}" >/dev/null 2>&1; then
+      invocation_guard_failure 4 HOST_TOOL_UNAVAILABLE \
+        "required command is unavailable: ${required_command}"
+      return 4
+    fi
+  done
+  local docker_platform
+  if ! bounded_run quick docker version >/dev/null; then
+    invocation_guard_failure 4 DOCKER_UNAVAILABLE "docker version failed"
+    return 4
+  fi
+  if ! docker_platform="$(bounded_run quick docker info --format '{{.OSType}}/{{.Architecture}}')"; then
+    invocation_guard_failure 4 DOCKER_UNAVAILABLE "docker platform observation failed"
+    return 4
+  fi
+  if [[ "${docker_platform}" != "linux/x86_64" \
+    && "${docker_platform}" != "linux/amd64" ]]; then
+    invocation_guard_failure 3 DOCKER_PLATFORM_UNSUPPORTED \
+      "required linux/amd64, observed ${docker_platform}"
+    return 3
+  fi
+  if [[ -n "${UG_EXPECTED_GPU_UUID:-}" ]]; then
+    if ! GPU_UUID="$(bounded_run preflight nvidia-smi --id="${UG_EXPECTED_GPU_UUID}" \
+      --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]')" \
+      || [[ "${GPU_UUID}" != "${UG_EXPECTED_GPU_UUID}" ]]; then
+      invocation_guard_failure 4 GPU_SELECTION_INVALID \
+        "the expected GPU UUID is unavailable"
+      return 4
+    fi
+  else
+    if ! GPU_UUID="$(bounded_run preflight nvidia-smi --id="${GPU_INDEX}" \
+      --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]')"; then
+      invocation_guard_failure 4 GPU_SELECTION_INVALID \
+        "the selected GPU index is unavailable"
+      return 4
+    fi
+  fi
+  if [[ "${GPU_UUID}" != GPU-* ]]; then
+    invocation_guard_failure 4 GPU_SELECTION_INVALID "nvidia-smi returned an invalid GPU UUID"
+    return 4
+  fi
   if [[ -f "${STATE_ROOT}/gpu.uuid" \
     && "$(<"${STATE_ROOT}/gpu.uuid")" != "${GPU_UUID}" ]]; then
-    printf 'This source-specific run already belongs to another GPU UUID.\n' >&2
-    return 1
+    invocation_guard_failure 4 GPU_STATE_CONFLICT \
+      "this source-specific run belongs to another GPU UUID"
+    return 4
   fi
 }
 
@@ -168,6 +295,23 @@ select_uv() {
       --disable-pip-version-check "uv==0.11.23"
   fi
   UV=("${bootstrap}/bin/uv")
+}
+
+load_authored_matrix() {
+  local values=()
+  mapfile -t values < <(
+    MATRIX_TEMPLATE_VALUE="${MATRIX_TEMPLATE}" REGISTRY_ADDRESS_VALUE="${REGISTRY_ADDRESS}" \
+      bounded_run quick "${UV[@]}" run --frozen python -c \
+      'import os,yaml; from pathlib import Path; from upgrade_guard.contracts.matrix import MatrixSpec; from upgrade_guard.matrix.digest import parse_image_reference; p=Path(os.environ["MATRIX_TEMPLATE_VALUE"]).resolve(strict=True); m=MatrixSpec.model_validate(yaml.safe_load(p.read_text())); assert [e.id for e in m.environments]==["baseline","candidate"]; a=os.environ["REGISTRY_ADDRESS_VALUE"]; expected=[a+"/upgrade-guard/worker:baseline",a+"/upgrade-guard/worker:candidate"]; assert [e.worker_image for e in m.environments]==expected; [(lambda x: (print(e.base_image), print(x.digest)))(parse_image_reference(e.base_image)) for e in m.environments if parse_image_reference(e.base_image).digest is not None]'
+  )
+  if [[ "${#values[@]}" -ne 4 ]]; then
+    printf 'The authored matrix must contain two digest-pinned linux/amd64 environments.\n' >&2
+    return 2
+  fi
+  BASELINE_BASE="${values[0]}"
+  BASELINE_BASE_MANIFEST="${values[1]}"
+  CANDIDATE_BASE="${values[2]}"
+  CANDIDATE_BASE_MANIFEST="${values[3]}"
 }
 
 preflight() {
@@ -288,12 +432,12 @@ build_workers() {
   ensure_exact_docker_image "${CANDIDATE_BASE}"
   bounded_run build docker build --pull=false \
     --build-arg "BASE_IMAGE=${BASELINE_BASE}" \
-    --build-arg "BASE_MANIFEST_DIGEST=sha256:2a5a0a9a32ec5ddc1c384c15ddcf3b89ddc4f8647e7ee7ae708d844210183a1e" \
+    --build-arg "BASE_MANIFEST_DIGEST=${BASELINE_BASE_MANIFEST}" \
     --tag "${REGISTRY_ADDRESS}/upgrade-guard/worker:baseline" \
     --file containers/Dockerfile.worker .
   bounded_run build docker build --pull=false \
     --build-arg "BASE_IMAGE=${CANDIDATE_BASE}" \
-    --build-arg "BASE_MANIFEST_DIGEST=sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a" \
+    --build-arg "BASE_MANIFEST_DIGEST=${CANDIDATE_BASE_MANIFEST}" \
     --tag "${REGISTRY_ADDRESS}/upgrade-guard/worker:candidate" \
     --file containers/Dockerfile.worker .
   bounded_run network docker push "${REGISTRY_ADDRESS}/upgrade-guard/worker:baseline"
@@ -319,7 +463,8 @@ ensure_worker_registry() {
   build_workers 2>&1 | tee -a "${LOG_ROOT}/worker-images.log"
   bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step worker-images \
-    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
+    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}" \
+    --qualification-spec "${QUALIFICATION_TEMPLATE}"
 }
 
 preserve_stale_matrix() {
@@ -334,7 +479,7 @@ preserve_stale_matrix() {
   local preserved="${STATE_ROOT}/stale/$(date -u +%Y%m%dT%H%M%S.%NZ)-matrix-lock"
   mkdir -p "${preserved}/done" "${preserved}/logs"
   local name
-  for name in matrix.lock.json matrix.yaml full.yaml; do
+  for name in matrix.lock.json matrix.yaml full.yaml core.yaml; do
     if [[ -e "${STATE_ROOT}/${name}" ]]; then
       mv "${STATE_ROOT}/${name}" "${preserved}/${name}"
     fi
@@ -351,7 +496,8 @@ preserve_stale_matrix() {
 reconcile_state() {
   bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py reconcile \
     --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" \
-    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
+    --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}" \
+    --qualification-spec "${QUALIFICATION_TEMPLATE}"
 }
 
 lock_matrix() {
@@ -359,8 +505,9 @@ lock_matrix() {
   local gpu_uuid
   gpu_uuid="$(<"${STATE_ROOT}/gpu.uuid")"
   MATRIX_PATH="${STATE_ROOT}/matrix.yaml" GPU_UUID_VALUE="${gpu_uuid}" \
+    MATRIX_TEMPLATE_VALUE="${MATRIX_TEMPLATE}" \
     bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import os,yaml; from pathlib import Path; p=Path("matrices/examples/controlled-minor.yaml"); v=yaml.safe_load(p.read_text()); v["gpu_uuid"]=os.environ["GPU_UUID_VALUE"]; Path(os.environ["MATRIX_PATH"]).write_text(yaml.safe_dump(v,sort_keys=False))'
+    'import os,yaml; from pathlib import Path; p=Path(os.environ["MATRIX_TEMPLATE_VALUE"]); v=yaml.safe_load(p.read_text()); v["gpu_uuid"]=os.environ["GPU_UUID_VALUE"]; Path(os.environ["MATRIX_PATH"]).write_text(yaml.safe_dump(v,sort_keys=False))'
   if [[ -f "${MATRIX_LOCK}" ]]; then
     bounded_run quick "${UV[@]}" run --frozen python -c \
       'import sys; from pathlib import Path; from upgrade_guard.contracts.environment import MatrixLock; p=Path(sys.argv[1]); m=MatrixLock.model_validate_json(p.read_text()); assert m.lock_sha256 == m.computed_sha256()' \
@@ -374,8 +521,17 @@ lock_matrix() {
   core_corpus_path="$(expected_corpus_path core)"
   QUALIFICATION_PATH="${STATE_ROOT}/full.yaml" GPU_UUID_VALUE="${gpu_uuid}" \
     LOCK_PATH="${MATRIX_LOCK}" CORE_CORPUS_PATH="${core_corpus_path}" \
+    REFERENCE_LOCK_PATH="${REFERENCE_LOCK}" \
+    CORE_QUALIFICATION_PATH="${STATE_ROOT}/core.yaml" \
+    QUALIFICATION_TEMPLATE_VALUE="${QUALIFICATION_TEMPLATE}" \
     bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import os,yaml; from pathlib import Path; p=Path("qualification/full.yaml"); v=yaml.safe_load(p.read_text()); v["hardware_validity"]["selected_gpu_uuid"]=os.environ["GPU_UUID_VALUE"]; v["environment_lock"]=os.environ["LOCK_PATH"]; v["corpus_root"]=Path(os.environ["CORE_CORPUS_PATH"]).relative_to(Path.cwd()).as_posix(); Path(os.environ["QUALIFICATION_PATH"]).write_text(yaml.safe_dump(v,sort_keys=False))'
+    'import copy,os,yaml; from pathlib import Path; p=Path(os.environ["QUALIFICATION_TEMPLATE_VALUE"]); v=yaml.safe_load(p.read_text()); v["hardware_validity"]["selected_gpu_uuid"]=os.environ["GPU_UUID_VALUE"]; v["environment_lock"]=os.environ["LOCK_PATH"]; v["reference_environment_lock"]=os.environ["REFERENCE_LOCK_PATH"]; v["corpus_root"]=Path(os.environ["CORE_CORPUS_PATH"]).relative_to(Path.cwd()).as_posix(); Path(os.environ["QUALIFICATION_PATH"]).write_text(yaml.safe_dump(v,sort_keys=False)); core=copy.deepcopy(v); core["required_cases"]=["tiny-transformer"]; Path(os.environ["CORE_QUALIFICATION_PATH"]).write_text(yaml.safe_dump(core,sort_keys=False))'
+}
+
+verify_matrix_live() {
+  cd "${PROJECT_ROOT}"
+  bounded_run gpu "${UV[@]}" run --frozen upgrade-guard matrix verify \
+    "${MATRIX_LOCK}" --json > "${STATE_ROOT}/matrix-live-verification.json"
 }
 
 expected_corpus_path() {
@@ -384,9 +540,77 @@ expected_corpus_path() {
   identity="$(bounded_run quick "${UV[@]}" run --frozen python \
     scripts/corpus_store.py identity \
     --project "${PROJECT_ROOT}" --kind "${kind}" \
+    --reference-environment-sha256 "$(reference_lock_sha256)" \
     | bounded_run quick "${UV[@]}" run --frozen python -c \
       'import json,sys; print(json.load(sys.stdin)["materializer_sha256"].removeprefix("sha256:"))')"
   printf '%s\n' "${CORPUS_STORE}/${kind}/${identity}"
+}
+
+reference_lock_sha256() {
+  bounded_run quick "${UV[@]}" run --frozen python -c \
+    'import sys; from pathlib import Path; from upgrade_guard.contracts.reference_environment import ReferenceEnvironmentLock; v=ReferenceEnvironmentLock.model_validate_json(Path(sys.argv[1]).read_text()); assert v.computed_sha256()==v.lock_sha256; print(v.lock_sha256)' \
+    "${REFERENCE_LOCK}"
+}
+
+reference_image() {
+  bounded_run quick "${UV[@]}" run --frozen python -c \
+    'import sys; from pathlib import Path; from upgrade_guard.contracts.reference_environment import ReferenceEnvironmentLock; v=ReferenceEnvironmentLock.model_validate_json(Path(sys.argv[1]).read_text()); assert v.computed_sha256()==v.lock_sha256; print(v.image.canonical_reference)' \
+    "${REFERENCE_LOCK}"
+}
+
+build_reference_environment() {
+  cd "${PROJECT_ROOT}"
+  ensure_exact_docker_image "${REFERENCE_BASE}"
+  bounded_run build docker build --pull=false \
+    --build-arg "BASE_IMAGE=${REFERENCE_BASE}" \
+    --build-arg "BASE_MANIFEST_DIGEST=${REFERENCE_BASE_MANIFEST}" \
+    --tag "${REFERENCE_IMAGE}" \
+    --file containers/Dockerfile.reference .
+  bounded_run network docker push "${REFERENCE_IMAGE}"
+  bounded_run network "${UV[@]}" run --frozen upgrade-guard dev lock-reference \
+    "${REFERENCE_IMAGE}" --out "${REFERENCE_LOCK}" --json
+}
+
+reference_run() {
+  local output=$1
+  shift
+  local output_parent output_name container_output
+  output_parent="$(dirname "${output}")"
+  output_name="$(basename "${output}")"
+  mkdir -p "${output_parent}"
+  container_output="/workspace/${output_name}"
+  local command=()
+  local argument
+  for argument in "$@"; do
+    if [[ "${argument}" == "/output" ]]; then
+      command+=("${container_output}")
+    else
+      command+=("${argument}")
+    fi
+  done
+  local image container_name status
+  image="$(reference_image)"
+  container_name="upgrade-guard-reference-${SOURCE_ID:0:8}-${BASHPID}-${RANDOM}"
+  set +e
+  bounded_run build docker run --rm --name "${container_name}" \
+    --platform linux/amd64 \
+    --user "$(id -u):$(id -g)" \
+    --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges=true --pids-limit 256 \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m \
+    --tmpfs /home/upgrade-guard:rw,nosuid,nodev,size=64m \
+    --env HOME=/home/upgrade-guard \
+    --env PYTHONPATH=/opt/upgrade-guard/src \
+    --mount "type=bind,src=${PROJECT_ROOT},dst=/opt/upgrade-guard,readonly" \
+    --mount "type=bind,src=${REFERENCE_LOCK},dst=/reference.lock.json,readonly" \
+    --mount "type=bind,src=${output_parent},dst=/workspace" \
+    --entrypoint "" "${image}" "${command[@]}"
+  status=$?
+  set -e
+  if [[ ${status} -ne 0 ]]; then
+    bounded_run cleanup docker container rm --force "${container_name}" >/dev/null 2>&1 || true
+  fi
+  return "${status}"
 }
 
 materialize_corpora() {
@@ -412,6 +636,7 @@ materialize_corpus_content_addressed() {
   if [[ -d "${destination}" ]] \
     && bounded_run quick "${UV[@]}" run --frozen python scripts/corpus_store.py verify \
       --project "${PROJECT_ROOT}" --kind "${kind}" --root "${destination}" \
+      --reference-environment-sha256 "$(reference_lock_sha256)" \
     && bounded_run quick "${UV[@]}" run --frozen python scripts/qualification_state.py \
       verify-corpus "${destination}"; then
     printf '%s\n' "${destination}"
@@ -427,12 +652,14 @@ materialize_corpus_content_addressed() {
   local generated="${staging}/corpus"
   "${producer}" "${generated}" >&2
   bounded_run quick "${UV[@]}" run --frozen python scripts/corpus_store.py write-sidecar \
-    --project "${PROJECT_ROOT}" --kind "${kind}" --root "${generated}"
+    --project "${PROJECT_ROOT}" --kind "${kind}" --root "${generated}" \
+    --reference-environment-sha256 "$(reference_lock_sha256)"
   bounded_run quick "${UV[@]}" run --frozen python \
     scripts/qualification_state.py verify-corpus "${generated}"
   bounded_run quick "${UV[@]}" run --frozen python scripts/corpus_store.py publish \
     --project "${PROJECT_ROOT}" --kind "${kind}" \
-    --staging "${generated}" --destination "${destination}" >/dev/null
+    --staging "${generated}" --destination "${destination}" \
+    --reference-environment-sha256 "$(reference_lock_sha256)" >/dev/null
   rmdir "${staging}" 2>/dev/null || true
   printf '%s\n' "${destination}"
 }
@@ -469,18 +696,25 @@ load_corpus_identities() {
 }
 
 materialize_core_corpus() {
-  bounded_run build "${UV[@]}" run --frozen upgrade-guard corpus materialize \
-    corpus/registry.yaml \
-    --out "$1" --json
+  reference_run "$1" python3 -m upgrade_guard.cli corpus materialize \
+    /opt/upgrade-guard/corpus/registry.yaml \
+    --out /output --reference-lock /reference.lock.json --json
 }
 
 materialize_plugin_corpus() {
-  bounded_run build "${UV[@]}" run --frozen python scripts/materialize_plugin_corpus.py "$1"
+  reference_run "$1" python3 /opt/upgrade-guard/scripts/materialize_plugin_corpus.py \
+    /output --reference-lock-sha256 "$(reference_lock_sha256)"
 }
 
 materialize_mobilenet_corpus() {
-  bounded_run network "${UV[@]}" run --frozen python \
-    scripts/materialize_mobilenet_corpus.py "$1"
+  local source="$1.source.onnx"
+  bounded_run network "${UV[@]}" run --frozen python -c \
+    'import sys; from pathlib import Path; from upgrade_guard.corpus.mobilenet import download_source; download_source(Path(sys.argv[1]))' \
+    "${source}"
+  reference_run "$1" python3 /opt/upgrade-guard/scripts/materialize_mobilenet_corpus.py \
+    /output --source "/workspace/$(basename "${source}")" \
+    --reference-lock-sha256 "$(reference_lock_sha256)"
+  rm -f "${source}"
 }
 
 load_worker_identities() {
@@ -548,6 +782,29 @@ gpu_run() {
   fi
 }
 
+run_extended_worker() {
+  local result_path=$1
+  local result_kind=$2
+  shift 2
+  local status=0
+  if gpu_run "$@"; then
+    return 0
+  else
+    status=$?
+  fi
+  if [[ ${status} -ne 1 ]]; then
+    return "${status}"
+  fi
+  if ! bounded_run quick "${UV[@]}" run --frozen python \
+    scripts/validate_worker_failure.py "${result_kind}" "${result_path}"; then
+    printf 'Worker exit 1 lacked a strict typed failed %s result: %s\n' \
+      "${result_kind}" "${result_path}" >&2
+    return 4
+  fi
+  EXTENDED_WORKER_DOMAIN_FAILURE=1
+  return 0
+}
+
 run_core_qualification() {
   cd "${PROJECT_ROOT}"
   if [[ -f "${STATE_ROOT}/core-run/qualification-summary.json" ]]; then
@@ -555,15 +812,39 @@ run_core_qualification() {
       "${STATE_ROOT}/core-run" --json
     return
   fi
-  bounded_run build "${UV[@]}" run --frozen upgrade-guard qualify \
-    "${STATE_ROOT}/full.yaml" \
-    --out "${STATE_ROOT}/core-run" --json
-  bounded_run quick "${UV[@]}" run --frozen upgrade-guard compare \
-    "${STATE_ROOT}/core-run" --json
+  local qualify_status=0
+  if bounded_run build "${UV[@]}" run --frozen upgrade-guard dev qualify-core \
+    "${STATE_ROOT}/core.yaml" \
+    --out "${STATE_ROOT}/core-run" --project-root "${PROJECT_ROOT}" --json; then
+    qualify_status=0
+  else
+    qualify_status=$?
+  fi
+  if [[ ${qualify_status} -ne 0 && ${qualify_status} -ne 1 ]]; then
+    return "${qualify_status}"
+  fi
+  local compare_status=0
+  if bounded_run quick "${UV[@]}" run --frozen upgrade-guard compare \
+    "${STATE_ROOT}/core-run" --json; then
+    compare_status=0
+  else
+    compare_status=$?
+  fi
+  if [[ ${compare_status} -ne ${qualify_status} ]]; then
+    printf 'Core qualification and stored comparison exit codes disagree.\n' >&2
+    return 4
+  fi
+  return "${qualify_status}"
 }
 
 compile_plugins() {
   load_worker_identities
+  local cuda_architecture
+  cuda_architecture="$(
+    bounded_run quick "${UV[@]}" run --frozen python -c \
+      'import sys; from pathlib import Path; from upgrade_guard.contracts.environment import MatrixLock; m=MatrixLock.model_validate_json(Path(sys.argv[1]).read_text()); values={e.probe.gpu.compute_capability.replace(".","") for e in m.environments}; assert len(values)==1; value=values.pop(); assert value.isdigit(); print(value)' \
+      "${MATRIX_LOCK}"
+  )"
   local names=(baseline candidate)
   local images=("${BASELINE_WORKER}" "${CANDIDATE_WORKER}")
   for index in 0 1; do
@@ -571,6 +852,7 @@ compile_plugins() {
     gpu_run "${images[${index}]}" "${PROJECT_ROOT}" "${output}" \
       cmake -S /opt/upgrade-guard -B /output/build -G Ninja \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DCMAKE_CUDA_ARCHITECTURES="${cuda_architecture}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DUPGRADE_GUARD_BUILD_TESTS=ON \
         -DUPGRADE_GUARD_BUILD_FAULTS=ON
@@ -857,6 +1139,7 @@ run_plugin_matrix() {
   local runs="${STATE_ROOT}/plugin-runs"
   local names=(baseline candidate)
   local images=("${BASELINE_WORKER}" "${CANDIDATE_WORKER}")
+  EXTENDED_WORKER_DOMAIN_FAILURE=0
   for index in 0 1; do
     local environment="${names[${index}]}"
     local image="${images[${index}]}"
@@ -868,7 +1151,8 @@ run_plugin_matrix() {
       local output="${runs}/${environment}/${precision}"
       mkdir -p "${output}"
       write_plugin_profile "${output}/profile.json"
-      gpu_run "${image}" "${corpus}" "${runs}" \
+      run_extended_worker "${output}/build.json" build \
+        "${image}" "${corpus}" "${runs}" \
         python3 -m upgrade_guard.worker.build_engine \
           --model "/corpus/residual-rmsnorm-${precision}.onnx" \
           --profile "/output/${environment}/${precision}/profile.json" \
@@ -877,11 +1161,15 @@ run_plugin_matrix() {
           --timing-cache "/output/${environment}/${precision}/timing.cache" \
           --result "/output/${environment}/${precision}/build.json" \
           --plugin "${plugin_container}"
+      if [[ ${EXTENDED_WORKER_DOMAIN_FAILURE} -eq 1 ]]; then
+        break 2
+      fi
       for case_path in "${corpus}/${precision}"/*; do
         local case_name
         case_name="$(basename "${case_path}")"
         mkdir -p "${output}/${case_name}"
-        gpu_run "${image}" "${corpus}" "${runs}" \
+        run_extended_worker "${output}/${case_name}/correctness.json" correctness \
+          "${image}" "${corpus}" "${runs}" \
           python3 -m upgrade_guard.worker.run_correctness \
             --engine "/output/${environment}/${precision}/engine.plan" \
             --input "x=/corpus/${precision}/${case_name}/x.npy" \
@@ -891,11 +1179,19 @@ run_plugin_matrix() {
             --result "/output/${environment}/${precision}/${case_name}/correctness.json" \
             --repetitions 20 \
             --plugin "${plugin_container}"
+        if [[ ${EXTENDED_WORKER_DOMAIN_FAILURE} -eq 1 ]]; then
+          break 3
+        fi
       done
     done
   done
   bounded_run quick "${UV[@]}" run --frozen python scripts/validate_plugin_outputs.py \
-    --corpus "${corpus}" --runs "${runs}" --output "${runs}/validation.json"
+    --corpus "${corpus}" --runs "${runs}" --specification "${STATE_ROOT}/full.yaml" \
+    --project-root "${PROJECT_ROOT}" --matrix-lock "${MATRIX_LOCK}" \
+    --source-commit-file "${STATE_ROOT}/source.commit" \
+    --plugin-build-root "${STATE_ROOT}/plugin-build" \
+    --plugin-build-log "${LOG_ROOT}/plugin-compile-test.log" \
+    --output "${runs}/validation.json"
 }
 
 write_mobilenet_profile() {
@@ -911,12 +1207,14 @@ run_mobilenet_matrix() {
   local runs="${STATE_ROOT}/mobilenet-runs"
   local names=(baseline candidate)
   local images=("${BASELINE_WORKER}" "${CANDIDATE_WORKER}")
+  EXTENDED_WORKER_DOMAIN_FAILURE=0
   for index in 0 1; do
     local environment="${names[${index}]}"
     local image="${images[${index}]}"
     mkdir -p "${runs}/${environment}"
     write_mobilenet_profile "${runs}/${environment}/profile.json"
-    gpu_run "${image}" "${corpus}" "${runs}" \
+    run_extended_worker "${runs}/${environment}/build.json" build \
+      "${image}" "${corpus}" "${runs}" \
       python3 -m upgrade_guard.worker.build_engine \
         --model /corpus/mobilenetv3-small-075-dynamic.onnx \
         --profile "/output/${environment}/profile.json" \
@@ -924,20 +1222,30 @@ run_mobilenet_matrix() {
         --inspector "/output/${environment}/inspector.json" \
         --timing-cache "/output/${environment}/timing.cache" \
         --result "/output/${environment}/build.json"
+    if [[ ${EXTENDED_WORKER_DOMAIN_FAILURE} -eq 1 ]]; then
+      break
+    fi
     for case_path in "${corpus}/inputs"/*; do
       local case_name
       case_name="$(basename "${case_path}")"
-      gpu_run "${image}" "${corpus}" "${runs}" \
+      run_extended_worker "${runs}/${environment}/${case_name}/correctness.json" correctness \
+        "${image}" "${corpus}" "${runs}" \
         python3 -m upgrade_guard.worker.run_correctness \
           --engine "/output/${environment}/engine.plan" \
           --input "x=/corpus/inputs/${case_name}/x.npy" \
           --output "/output/${environment}/${case_name}/outputs" \
           --result "/output/${environment}/${case_name}/correctness.json" \
           --repetitions 20
+      if [[ ${EXTENDED_WORKER_DOMAIN_FAILURE} -eq 1 ]]; then
+        break 2
+      fi
     done
   done
   bounded_run quick "${UV[@]}" run --frozen python scripts/validate_mobilenet_outputs.py \
-    --corpus "${corpus}" --runs "${runs}" --output "${runs}/validation.json"
+    --corpus "${corpus}" --runs "${runs}" --specification "${STATE_ROOT}/full.yaml" \
+    --project-root "${PROJECT_ROOT}" --matrix-lock "${MATRIX_LOCK}" \
+    --source-commit-file "${STATE_ROOT}/source.commit" \
+    --output "${runs}/validation.json"
 }
 
 run_aa_pilot() {
@@ -961,12 +1269,15 @@ run_aa_pilot() {
       --inspector /output/inspector.json \
       --timing-cache /output/timing.cache \
       --result /output/build.json
+  bounded_run quick "${UV[@]}" run --frozen python -c \
+    'import json,sys; from pathlib import Path; from upgrade_guard.worker.trtexec import freeze_raw_inputs; corpus,output=map(Path,sys.argv[1:]); frozen=freeze_raw_inputs({"mask":corpus/"inputs/tiny-transformer-fp32/b1_s128/mask.npy","tokens":corpus/"inputs/tiny-transformer-fp32/b1_s128/tokens.npy"},output/"raw-inputs","/output/raw-inputs"); (output/"raw-inputs.json").write_text(json.dumps([x.__dict__ for x in frozen],indent=2,sort_keys=True)+"\n")' \
+    "${corpus}" "${output}"
   trtexec_path="$(bounded_run quick "${UV[@]}" run --frozen python -c \
     'import sys; from pathlib import Path; from upgrade_guard.contracts.environment import MatrixLock; m=MatrixLock.model_validate_json(Path(sys.argv[1]).read_text()); print(m.environments[0].probe.trtexec.path)' \
     "${MATRIX_LOCK}" \
   )"
   stream_option="$(bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import sys; from pathlib import Path; from upgrade_guard.contracts.environment import MatrixLock; m=MatrixLock.model_validate_json(Path(sys.argv[1]).read_text()); o=m.environments[0].probe.trtexec.options; assert "--infStreams" in o or "--streams" in o; print("--infStreams=1" if "--infStreams" in o else "--streams=1")' \
+    'import sys; from pathlib import Path; from upgrade_guard.contracts.environment import MatrixLock; m=MatrixLock.model_validate_json(Path(sys.argv[1]).read_text()); o=m.environments[0].probe.trtexec.options; assert "--loadInputs" in o; assert "--infStreams" in o or "--streams" in o; print("--infStreams=1" if "--infStreams" in o else "--streams=1")' \
     "${MATRIX_LOCK}" \
   )"
   local accepted=0
@@ -997,6 +1308,7 @@ run_aa_pilot() {
         "${trtexec_path}" \
           --loadEngine=/output/engine.plan \
           --shapes=mask:1x1x1x128,tokens:1x128x256 \
+          --loadInputs=mask:/output/raw-inputs/mask.raw,tokens:/output/raw-inputs/tokens.raw \
           "--exportTimes=/output/attempt-${attempt_id}/${side}-precondition.json" \
           --warmUp=500 --duration=1 "${stream_option}" --noDataTransfers
       if ! bounded_run quick "${UV[@]}" run --frozen python \
@@ -1010,6 +1322,7 @@ run_aa_pilot() {
         "${trtexec_path}" \
           --loadEngine=/output/engine.plan \
           --shapes=mask:1x1x1x128,tokens:1x128x256 \
+          --loadInputs=mask:/output/raw-inputs/mask.raw,tokens:/output/raw-inputs/tokens.raw \
           "--exportTimes=/output/attempt-${attempt_id}/${side}.json" \
           --warmUp=500 --duration=1 "${stream_option}" --noDataTransfers
       bounded_run quick "${UV[@]}" run --frozen python scripts/hardware_validity.py capture \
@@ -1060,7 +1373,7 @@ run_gpu_faults() {
   : > "${samples}"
   local accepted=0
   local attempt=0
-  while [[ ${accepted} -lt 20 && ${attempt} -lt 60 ]]; do
+  while [[ ${accepted} -lt 24 && ${attempt} -lt 72 ]]; do
     local attempt_id
     attempt_id="$(printf '%02d' "${attempt}")"
     local attempt_root="${output}/attempt-${attempt_id}"
@@ -1072,7 +1385,7 @@ run_gpu_faults() {
     if [[ ${pair_valid} -eq 1 ]]; then
       gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
         /state/plugin-build/candidate/build/upgrade_guard_gpu_faults \
-        --pair-index "${accepted}" > "${attempt_root}/precondition.json"
+        --pair-index "${accepted}" > "${attempt_root}/precondition.json" || pair_valid=0
       bounded_run quick "${UV[@]}" run --frozen python \
         scripts/hardware_validity.py capture \
         --specification "${STATE_ROOT}/full.yaml" --gpu "${GPU_UUID}" --loaded \
@@ -1081,7 +1394,7 @@ run_gpu_faults() {
     if [[ ${pair_valid} -eq 1 ]]; then
       gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
         /state/plugin-build/candidate/build/upgrade_guard_gpu_faults \
-        --pair-index "${accepted}" > "${attempt_root}/sample.json"
+        --pair-index "${accepted}" > "${attempt_root}/sample.json" || pair_valid=0
       bounded_run quick "${UV[@]}" run --frozen python \
         scripts/hardware_validity.py capture \
         --specification "${STATE_ROOT}/full.yaml" --gpu "${GPU_UUID}" --loaded \
@@ -1104,16 +1417,14 @@ run_gpu_faults() {
     fi
     attempt=$((attempt + 1))
   done
-  [[ ${accepted} -eq 20 ]]
-  bounded_run quick "${UV[@]}" run --frozen python \
-    scripts/validate_seeded_gpu_faults.py \
-    --samples "${samples}" --output "${output}/validation.json"
+  [[ ${accepted} -eq 24 ]]
   gpu_run "${CANDIDATE_WORKER}" "${PROJECT_ROOT}" "${output}" \
     /state/plugin-build/candidate/build/upgrade_guard_serialization_fault \
     > "${output}/G6.json"
-  bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,sys; p=sys.argv[1]; v=json.load(open(p)); assert v["detected"] and v["control"]=="passed"' \
-    "${output}/G6.json"
+  bounded_run quick "${UV[@]}" run --frozen python \
+    scripts/validate_seeded_gpu_faults.py \
+    --samples "${samples}" --serialization "${output}/G6.json" \
+    --output "${output}/validation.json"
 
   mkdir -p "${output}/g1"
   write_plugin_profile "${output}/g1/profile.json"
@@ -1133,7 +1444,7 @@ run_gpu_faults() {
     return 1
   fi
   bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,sys; from pathlib import Path; from upgrade_guard.contracts.base import sha256_file; src,control,dst=map(Path,sys.argv[1:]); v=json.load(src.open()); c=json.load(control.open()); assert v["status"]=="failed" and "parser" in v["message"].lower(); assert c["status"]=="passed"; json.dump({"expected":"ONNX_PARSE_FAILED","detected":True,"control":"passed","control_build_sha256":sha256_file(control),"worker":v},dst.open("w"),indent=2)' \
+    'import json,sys; from pathlib import Path; from scripts.validate_seeded_gpu_faults import classify_seed_record; from upgrade_guard.contracts.base import sha256_file; src,control,dst=map(Path,sys.argv[1:]); v=json.load(src.open()); c=json.load(control.open()); assert v["status"]=="failed" and "parser" in v["message"].lower(); assert c["status"]=="passed"; record={"mechanism":"unsupported_custom_domain_onnx_node","detected":True,"control":"passed","observed_facts":{"parsed":False},"control_build_sha256":sha256_file(control),"worker":v}; record["classification"]=classify_seed_record("G1",record).value; json.dump(record,dst.open("w"),indent=2,sort_keys=True)' \
     "${output}/g1/build.json" \
     "${STATE_ROOT}/plugin-runs/candidate/fp32/build.json" "${output}/G1.json"
 
@@ -1162,7 +1473,7 @@ run_gpu_faults() {
     return 1
   fi
   bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,sys; from pathlib import Path; from upgrade_guard.contracts.base import sha256_file; src,control,dst=map(Path,sys.argv[1:]); v=json.load(src.open()); c=json.load(control.open()); assert v["status"]=="failed" and "shape was rejected" in v["message"]; assert c["status"]=="passed"; json.dump({"expected":"PROFILE_REJECTED","detected":True,"control":"passed","control_run_sha256":sha256_file(control),"worker":v},dst.open("w"),indent=2)' \
+    'import json,sys; from pathlib import Path; from scripts.validate_seeded_gpu_faults import classify_seed_record; from upgrade_guard.contracts.base import sha256_file; src,control,dst=map(Path,sys.argv[1:]); v=json.load(src.open()); c=json.load(control.open()); assert v["status"]=="failed" and "shape was rejected" in v["message"]; assert c["status"]=="passed"; record={"mechanism":"input_exceeds_optimization_profile","detected":True,"control":"passed","observed_facts":{"profile_accepted":False},"control_run_sha256":sha256_file(control),"worker":v}; record["classification"]=classify_seed_record("G7",record).value; json.dump(record,dst.open("w"),indent=2,sort_keys=True)' \
     "${output}/g7/correctness.json" "${output}/g7/control-correctness.json" \
     "${output}/G7.json"
   [[ -d "${build}" ]]
@@ -1185,21 +1496,22 @@ run_replay_seed() {
   local seed_root="${root}/${seed}"
   mkdir -p "${seed_root}"
   bounded_run build "${UV[@]}" run --frozen upgrade-guard reproduce run "${bundle}" \
-    --out "${seed_root}/replay-output" --trust-source-code --json \
+    --out "${seed_root}/replay-output" --trust-source-code \
+    --gpu "${GPU_UUID}" --local-registry "${REGISTRY_ADDRESS}" --json \
     > "${seed_root}/cli-result.json"
   SEED_VALUE="${seed}" PREPARED_PATH="${root}/prepared/prepared.json" \
     REPLAY_PATH="${seed_root}/replay-output/replay-result.json" \
     CLI_PATH="${seed_root}/cli-result.json" \
     bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,os; expected={"G2":"NUMERICAL_REGRESSION","G7":"PROFILE_REJECTED"}; seed=os.environ["SEED_VALUE"]; prepared=json.load(open(os.environ["PREPARED_PATH"])); replay=json.load(open(os.environ["REPLAY_PATH"])); cli=json.load(open(os.environ["CLI_PATH"])); bundle=prepared["clean_bundles"][seed]; assert replay==cli and replay["status"]=="passed" and replay["expected_failure_code"]==expected[seed] and replay["bundle_manifest_sha256"]==bundle["bundle_manifest_sha256"]'
+    'import json,os; expected={"G2":"NUMERICAL_REGRESSION","G7":"PROFILE_REJECTED"}; seed=os.environ["SEED_VALUE"]; prepared=json.load(open(os.environ["PREPARED_PATH"])); replay=json.load(open(os.environ["REPLAY_PATH"])); cli=json.load(open(os.environ["CLI_PATH"])); bundle=prepared["clean_bundles"][seed]; assert replay==cli and replay["status"]=="passed" and replay["expected_failure_code"]==expected[seed] and replay["observed_failure_code"]==expected[seed] and replay["bundle_manifest_sha256"]==bundle["bundle_manifest_sha256"]'
 }
 
 validate_reduction_replays() {
   local root="${STATE_ROOT}/reductions"
   bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,sys; from pathlib import Path; root,out=map(Path,sys.argv[1:]); prepared=json.load((root/"prepared/prepared.json").open()); expected={"G2":"NUMERICAL_REGRESSION","G7":"PROFILE_REJECTED"}; replays={};
+    'import json,sys; from pathlib import Path; root,out=map(Path,sys.argv[1:]); prepared=json.load((root/"prepared/prepared.json").open()); expected={"G2":"NUMERICAL_REGRESSION","G7":"PROFILE_REJECTED"}; replays={"G5":prepared["performance"]["clean_replay"]}; assert replays["G5"]["status"]=="passed" and replays["G5"]["expected_failure_code"]=="PERFORMANCE_REGRESSION" and replays["G5"]["observed_failure_code"]=="PERFORMANCE_REGRESSION" and replays["G5"]["fresh_directory"] is True;
 for seed,code in expected.items():
- value=json.load((root/f"{seed}/replay-output/replay-result.json").open()); cli=json.load((root/f"{seed}/cli-result.json").open()); bundle=prepared["clean_bundles"][seed]; assert value==cli and value["status"]=="passed" and value["expected_failure_code"]==code and value["bundle_manifest_sha256"]==bundle["bundle_manifest_sha256"]; replays[seed]=value
+ value=json.load((root/f"{seed}/replay-output/replay-result.json").open()); cli=json.load((root/f"{seed}/cli-result.json").open()); bundle=prepared["clean_bundles"][seed]; assert value==cli and value["status"]=="passed" and value["expected_failure_code"]==code and value["observed_failure_code"]==code and value["bundle_manifest_sha256"]==bundle["bundle_manifest_sha256"]; replays[seed]=value
 prepared["status"]="passed"; prepared["clean_replays"]=replays; json.dump(prepared,out.open("w"),indent=2,sort_keys=True)' \
     "${root}" "${root}/validation.json"
 }
@@ -1261,7 +1573,7 @@ run_sanitizers() {
   grep -E 'ERROR SUMMARY: [1-9][0-9]* error' \
     "${output}/sanitizer-tail-oob.log" >/dev/null
   bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,sys; from pathlib import Path; log=Path(sys.argv[1]); out=Path(sys.argv[2]); json.dump({"expected":"SANITIZER_FAILURE","observed_exit_code":86,"diagnostic":"out_of_bounds_global_access","diagnostic_log_sha256":__import__("upgrade_guard.contracts.base",fromlist=["sha256_file"]).sha256_file(log),"control":"passed"},out.open("w"),indent=2,sort_keys=True)' \
+    'import json,sys; from pathlib import Path; from scripts.validate_seeded_gpu_faults import classify_seed_record; from upgrade_guard.contracts.base import sha256_file; log=Path(sys.argv[1]); out=Path(sys.argv[2]); record={"mechanism":"vectorized_tail_out_of_bounds","detected":True,"control":"passed","observed_facts":{"sanitizer_valid":False},"observed_exit_code":86,"diagnostic":"out_of_bounds_global_access","diagnostic_log_sha256":sha256_file(log)}; record["classification"]=classify_seed_record("G4",record).value; json.dump(record,out.open("w"),indent=2,sort_keys=True)' \
     "${output}/sanitizer-tail-oob.log" "${output}/sanitizer-seed.json"
   SANITIZER_ROOT="${output}" bounded_run quick "${UV[@]}" run --frozen python -c \
     'import json,os; from pathlib import Path; from upgrade_guard.contracts.base import sha256_file; root=Path(os.environ["SANITIZER_ROOT"]); seed=json.load((root/"sanitizer-seed.json").open()); controls={};
@@ -1367,16 +1679,44 @@ audit_dependencies() {
     --disable-pip --require-hashes \
     --format json --output "${output}/worker-pip-audit.json" \
     --progress-spinner off
+  bounded_run audit "${UV[@]}" run --frozen pip-audit \
+    --requirement containers/requirements-reference.txt \
+    --disable-pip --require-hashes \
+    --format json --output "${output}/reference-pip-audit.json" \
+    --progress-spinner off
   TRIAGE_PATH="${output}/triage.json" \
     bounded_run quick "${UV[@]}" run --frozen python -c \
-    'import json,os; from pathlib import Path; p=Path(os.environ["TRIAGE_PATH"]); v={"schema_version":"upgradeguard.dev/dependency-triage/v1","status":"passed","audited_scopes":["uv.lock Python dependencies","hash-locked Python dependencies added by containers/Dockerfile.worker"],"inventory_only_scopes":["preinstalled NGC Python packages","worker Debian packages","NVIDIA proprietary packages"],"claim":"Passing audits apply only to the explicitly audited Python scopes. Worker SPDX documents inventory the remaining packages but do not claim vulnerability-free images.","release_policy":"Any published result must retain this limitation and the exact worker SBOM hashes."}; p.write_text(json.dumps(v,indent=2,sort_keys=True)+"\n")'
+    'import json,os; from pathlib import Path; p=Path(os.environ["TRIAGE_PATH"]); v={"schema_version":"upgradeguard.dev/dependency-triage/v1","status":"passed","audited_scopes":["uv.lock Python dependencies","hash-locked Python dependencies added by containers/Dockerfile.worker","hash-locked Python dependencies added by containers/Dockerfile.reference"],"inventory_only_scopes":["preinstalled NGC Python packages","worker Debian packages","NVIDIA proprietary packages","reference-image operating-system packages"],"claim":"Passing audits apply only to the explicitly audited Python scopes. The remaining image package inventories do not claim vulnerability-free images.","release_policy":"Any published result must retain this limitation, the exact worker SBOM hashes, and the reference environment lock."}; p.write_text(json.dumps(v,indent=2,sort_keys=True)+"\n")'
 }
 
 finalize() {
   cd "${PROJECT_ROOT}"
   bounded_run evidence "${UV[@]}" run --frozen python scripts/generate_remote_evidence.py \
     --state "${STATE_ROOT}" --output "${STATE_ROOT}/evidence.json"
-  printf 'COMPLETE evidence=%s\n' "${STATE_ROOT}/evidence.json"
+}
+
+finish_failed_qualification() {
+  if [[ -z "${QUALIFICATION_FAILURE_STEP}" ]]; then
+    return
+  fi
+  printf 'Publishing completed failure from step: %s\n' "${QUALIFICATION_FAILURE_STEP}"
+  run_step public-failure resolve_public_failure
+  run_step final-evidence finalize
+  run_step terminal-cleanup terminal_cleanup
+  printf 'QUALIFICATION_FAILED evidence=%s\n' "${STATE_ROOT}/evidence.json"
+  QUALIFICATION_FAILURE_REPORTED=1
+  exit 1
+}
+
+resolve_public_failure() {
+  load_worker_identities
+  bounded_run evidence "${UV[@]}" run --frozen python scripts/process_public_failure.py \
+    --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" \
+    --source-step "${QUALIFICATION_FAILURE_STEP}" \
+    --core-corpus "${CORE_CORPUS}" --plugin-corpus "${PLUGIN_CORPUS}" \
+    --mobilenet-corpus "${MOBILENET_CORPUS}" \
+    --output "${STATE_ROOT}/public-failure" \
+    --local-registry "${REGISTRY_ADDRESS}"
 }
 
 terminal_cleanup() {
@@ -1404,15 +1744,18 @@ if [[ "${RUN_MODE}" == "full" ]]; then
 fi
 run_always_step registry-bootstrap start_local_registry
 run_step capacity-preflight capacity_preflight
+run_step reference-environment build_reference_environment
 if [[ "${RUN_MODE}" == "full" ]]; then
   run_step corpus-materialization materialize_corpora
 else
   run_step corpus-materialization materialize_bounded_corpora
 fi
+load_authored_matrix
 run_step worker-images build_workers
 ensure_worker_registry
 preserve_stale_matrix
 run_step matrix-lock lock_matrix
+run_always_step matrix-live-verification verify_matrix_live
 if [[ "${SMOKE_ONLY}" == "1" ]]; then
   run_step plugin-compile-test compile_plugins
   run_step gpu-smoke run_gpu_smoke
@@ -1430,9 +1773,12 @@ run_step sanitizers run_sanitizers
 run_step sboms generate_sboms
 run_step aa-pilot run_aa_pilot
 run_step core-qualification run_core_qualification
+finish_failed_qualification
 run_step plugin-benchmark run_plugin_benchmark
 run_step plugin-matrix run_plugin_matrix
+finish_failed_qualification
 run_step mobilenet-matrix run_mobilenet_matrix
+finish_failed_qualification
 run_step fault-inputs materialize_fault_inputs
 run_step gpu-faults run_gpu_faults
 run_step reduction-prepare prepare_reductions
@@ -1442,8 +1788,6 @@ run_step reduction-validation validate_reduction_replays
 run_step memory-seed run_memory_seed
 run_step profiles run_profiles
 run_step final-evidence finalize
-CURRENT_STEP=terminal-cleanup
-terminal_cleanup 2>&1 | tee "${LOG_ROOT}/terminal-cleanup.log"
-bounded_run evidence "${UV[@]}" run --frozen python scripts/qualification_state.py record \
-  --state "${STATE_ROOT}" --project "${PROJECT_ROOT}" --step terminal-cleanup \
-  --source "${SOURCE_ID}" --gpu "${GPU_UUID}" --mode "${RUN_MODE}"
+# run_step records the completed command with qualification_state.py record --step terminal-cleanup.
+run_step terminal-cleanup terminal_cleanup
+printf 'COMPLETE evidence=%s\n' "${STATE_ROOT}/evidence.json"

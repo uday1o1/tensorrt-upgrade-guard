@@ -44,6 +44,8 @@ testpaths = ["tests"]
 branch = true
 source = ["upgrade_guard"]
 omit = [
+  "src/upgrade_guard/reduce/profile_check.py",
+  "src/upgrade_guard/reduce/profile_graph.py",
   "src/upgrade_guard/worker/build_engine.py",
   "src/upgrade_guard/worker/run_correctness.py",
 ]

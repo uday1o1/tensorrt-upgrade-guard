@@ -213,6 +213,32 @@ def test_build_lock_captures_exact_pair_and_self_hash() -> None:
     assert result.environments[1].host == host
 
 
+def test_verify_reprobes_complete_lock_and_rejects_tool_drift() -> None:
+    expected = locker().build(matrix_spec(), source_sha256=digest("9"))
+    resolver, prober = lock_dependencies()
+    subject = MatrixLocker(
+        runner=ToolkitRunner(),
+        resolver=resolver,
+        prober=prober,
+        doctor=supported_doctor,
+        clock=lambda: FIXED_TIME,
+    )
+    observed = subject.verify(expected)
+    assert observed.gpu_uuid == expected.gpu_uuid
+    assert len(prober.images) == 2
+
+    first = next(iter(prober.probes))
+    execution = prober.probes[first]
+    prober.probes[first] = ProbeExecution(
+        execution.probe.model_copy(update={"tensorrt": "drifted"}),
+        execution.command_sha256,
+        execution.output_sha256,
+    )
+    with pytest.raises(InfrastructureError, match="differs from the immutable lock") as error:
+        subject.verify(expected)
+    assert "baseline.probe" in error.value.details["drifted_fields"]
+
+
 def test_lock_writes_only_complete_valid_json(tmp_path: Path) -> None:
     matrix = tmp_path / "matrix.yaml"
     matrix.write_text(

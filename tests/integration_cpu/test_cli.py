@@ -10,15 +10,28 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from tests.factories import FIXED_TIME, digest, run_result, supported_doctor
+from tests.factories import (
+    FIXED_TIME,
+    digest,
+    reference_environment_lock,
+    run_result,
+    supported_doctor,
+)
 from upgrade_guard.cli import app
+from upgrade_guard.contracts.common import ArtifactReference
 from upgrade_guard.contracts.environment import PlatformIdentity, ResolvedImage
 from upgrade_guard.errors import FailureCode, InvalidInputError, UnsupportedEnvironmentError
 from upgrade_guard.qualification import QualificationOutcome
 from upgrade_guard.report.model import build_report_model
-from upgrade_guard.reproduce.run import ReplayResult
+from upgrade_guard.reproduce.run import ReplayResult, ReplayTarget
 
 runner = CliRunner()
+
+
+def _write_reference_lock(root: Path) -> Path:
+    path = root / "reference-environment.lock.json"
+    path.write_text(reference_environment_lock().model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def test_doctor_json_reports_an_injected_supported_host(
@@ -177,6 +190,7 @@ def test_hidden_dev_resolver_bootstraps_worker_build(
 
 
 def test_corpus_materialize_cli_human_and_json(tmp_path: Path) -> None:
+    reference_lock = _write_reference_lock(tmp_path)
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(
         """api_version: upgradeguard.dev/v1alpha1
@@ -192,7 +206,16 @@ transformer_shapes:
         encoding="utf-8",
     )
     first = runner.invoke(
-        app, ["corpus", "materialize", str(recipe), "--out", str(tmp_path / "first")]
+        app,
+        [
+            "corpus",
+            "materialize",
+            str(recipe),
+            "--out",
+            str(tmp_path / "first"),
+            "--reference-lock",
+            str(reference_lock),
+        ],
     )
     assert first.exit_code == 0
     assert "Materialized immutable corpus" in first.stdout
@@ -204,6 +227,8 @@ transformer_shapes:
             str(recipe),
             "--out",
             str(tmp_path / "second"),
+            "--reference-lock",
+            str(reference_lock),
             "--json",
         ],
     )
@@ -214,8 +239,13 @@ transformer_shapes:
 class StubQualificationRunner:
     status = "passed"
 
-    def run(self, qualification: Path, output: Path) -> QualificationOutcome:
-        del qualification
+    def run(
+        self,
+        qualification: Path,
+        output: Path,
+        **kwargs: object,
+    ) -> QualificationOutcome:
+        del qualification, kwargs
         failure_codes = (FailureCode.NUMERICAL_REGRESSION,) if self.status == "failed" else ()
         return QualificationOutcome(output, self.status, failure_codes)  # type: ignore[arg-type]
 
@@ -223,7 +253,9 @@ class StubQualificationRunner:
 def test_qualify_and_compare_cli_statuses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     specification = tmp_path / "qualification.yaml"
     specification.write_text("kind: Qualification\n", encoding="utf-8")
-    monkeypatch.setattr("upgrade_guard.cli.QualificationRunner", StubQualificationRunner)
+    monkeypatch.setattr(
+        "upgrade_guard.orchestrator.FullQualificationRunner", StubQualificationRunner
+    )
     output = tmp_path / "run"
     result = runner.invoke(app, ["qualify", str(specification), "--out", str(output), "--json"])
     assert result.exit_code == 0
@@ -253,11 +285,116 @@ def test_qualify_and_compare_cli_statuses(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert json.loads(machine.stdout)["status"] == "passed"
 
 
+def test_compare_rejects_incomplete_passing_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    specification = tmp_path / "qualification.yaml"
+    specification.write_text("kind: Qualification\n", encoding="utf-8")
+
+    class PublishedQualificationRunner:
+        def run(
+            self,
+            qualification: Path,
+            output: Path,
+            **kwargs: object,
+        ) -> QualificationOutcome:
+            del qualification, kwargs
+            summary = {
+                "schema_version": "upgradeguard.dev/qualification-summary/v1",
+                "status": "passed",
+                "failure_codes": [],
+            }
+            core = output / "core-run"
+            core.mkdir(parents=True)
+            (core / "qualification-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            (output / "results.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "upgradeguard.dev/published-result-table/v1",
+                        "status": "passed",
+                        "failure_codes": [],
+                        "core_qualification": summary,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return QualificationOutcome(output, "passed", ())
+
+    monkeypatch.setattr(
+        "upgrade_guard.orchestrator.FullQualificationRunner",
+        PublishedQualificationRunner,
+    )
+    output = tmp_path / "public-run"
+    qualified = runner.invoke(
+        app,
+        ["qualify", str(specification), "--out", str(output), "--json"],
+    )
+    compared = runner.invoke(app, ["compare", str(output), "--json"])
+
+    assert qualified.exit_code == 0
+    assert compared.exit_code == 2
+    assert json.loads(compared.stdout)["error_code"] == "INVALID_INPUT"
+
+
+def test_compare_rejects_incomplete_failed_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    specification = tmp_path / "qualification.yaml"
+    specification.write_text("kind: Qualification\n", encoding="utf-8")
+
+    class FailedQualificationRunner:
+        def run(
+            self,
+            qualification: Path,
+            output: Path,
+            **kwargs: object,
+        ) -> QualificationOutcome:
+            del qualification, kwargs
+            summary = {
+                "schema_version": "upgradeguard.dev/qualification-summary/v1",
+                "status": "passed",
+                "failure_codes": [],
+            }
+            published = {
+                "schema_version": "upgradeguard.dev/published-result-table/v1",
+                "status": "failed",
+                "failure_codes": ["OUTPUT_SCHEMA_CHANGED"],
+                "core_qualification": summary,
+            }
+            core = output / "core-run"
+            core.mkdir(parents=True)
+            (core / "qualification-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            (output / "results.json").write_text(json.dumps(published), encoding="utf-8")
+            return QualificationOutcome(
+                output,
+                "failed",
+                (FailureCode.OUTPUT_SCHEMA_CHANGED,),
+            )
+
+    monkeypatch.setattr(
+        "upgrade_guard.orchestrator.FullQualificationRunner",
+        FailedQualificationRunner,
+    )
+    output = tmp_path / "public-failed-run"
+    qualified = runner.invoke(
+        app,
+        ["qualify", str(specification), "--out", str(output), "--json"],
+    )
+    compared = runner.invoke(app, ["compare", str(output), "--json"])
+
+    assert qualified.exit_code == 1
+    assert compared.exit_code == 2
+    assert json.loads(compared.stdout)["error_code"] == "INVALID_INPUT"
+
+
 @pytest.mark.parametrize(
     ("status", "failure_codes", "exit_code"),
     [
         ("passed", [], 0),
         ("failed", ["NUMERICAL_REGRESSION"], 1),
+        ("failed", ["CORPUS_INVALID"], 2),
         ("inconclusive", ["INCONCLUSIVE"], 4),
         ("infrastructure_invalid", ["INFRASTRUCTURE_INVALID"], 4),
     ],
@@ -323,11 +460,21 @@ def test_report_and_reproduce_verify_cli(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 def test_cli_expected_errors_and_reduction(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    reference_lock = _write_reference_lock(tmp_path)
     recipe = tmp_path / "bad-recipe.yaml"
     recipe.write_text("bad: recipe\n", encoding="utf-8")
     corpus = runner.invoke(
         app,
-        ["corpus", "materialize", str(recipe), "--out", str(tmp_path / "corpus"), "--json"],
+        [
+            "corpus",
+            "materialize",
+            str(recipe),
+            "--out",
+            str(tmp_path / "corpus"),
+            "--reference-lock",
+            str(reference_lock),
+            "--json",
+        ],
     )
     assert corpus.exit_code == 2
     assert json.loads(corpus.stdout)["error_code"] == "INVALID_INPUT"
@@ -336,11 +483,18 @@ def test_cli_expected_errors_and_reduction(monkeypatch: pytest.MonkeyPatch, tmp_
     specification.write_text("kind: Qualification\n", encoding="utf-8")
 
     class FailingQualificationRunner:
-        def run(self, qualification: Path, output: Path) -> QualificationOutcome:
-            del qualification, output
+        def run(
+            self,
+            qualification: Path,
+            output: Path,
+            **kwargs: object,
+        ) -> QualificationOutcome:
+            del qualification, output, kwargs
             raise InvalidInputError("bad qualification")
 
-    monkeypatch.setattr("upgrade_guard.cli.QualificationRunner", FailingQualificationRunner)
+    monkeypatch.setattr(
+        "upgrade_guard.orchestrator.FullQualificationRunner", FailingQualificationRunner
+    )
     qualified = runner.invoke(
         app,
         ["qualify", str(specification), "--out", str(tmp_path / "run"), "--json"],
@@ -392,21 +546,127 @@ def test_cli_human_resolver_and_typed_replay_result(
         bundle_id="bundle",
         bundle_manifest_sha256=digest("b"),
         worker_image="registry.example/worker@" + digest("c"),
+        worker_rebuild_recipe_sha256=digest("d"),
+        worker_build_log_sha256=digest("e"),
+        worker_build_log=ArtifactReference(
+            path="logs/worker-build.log",
+            sha256=digest("e"),
+            bytes=5,
+            media_type="text/plain",
+        ),
+        original_gpu_uuid="GPU-22222222-2222-2222-2222-222222222222",
         selected_gpu_uuid="GPU-11111111-1111-1111-1111-111111111111",
-        expected_failure_code="PROFILE_REJECTED",
+        expected_failure_code=FailureCode.PROFILE_REJECTED,
+        observed_failure_code=FailureCode.PROFILE_REJECTED,
         step_results=("build-engine", "seeded-failure"),
     )
     monkeypatch.setattr("upgrade_guard.cli.execute_replay", lambda *args, **kwargs: replay)
+    monkeypatch.setattr(
+        "upgrade_guard.cli.observe_replay_target",
+        lambda gpu_uuid: ReplayTarget(
+            gpu_uuid=gpu_uuid or "GPU-11111111-1111-1111-1111-111111111111",
+            compute_capability="8.9",
+            driver_version="610.0",
+            vram_mib=24576,
+        ),
+    )
+    target_arguments = [
+        "--gpu",
+        "GPU-11111111-1111-1111-1111-111111111111",
+        "--local-registry",
+        "127.0.0.1:5500",
+    ]
     result = runner.invoke(
         app,
-        ["reproduce", "run", str(bundle), "--out", str(tmp_path / "replay"), "--json"],
+        [
+            "reproduce",
+            "run",
+            str(bundle),
+            "--out",
+            str(tmp_path / "replay"),
+            *target_arguments,
+            "--json",
+        ],
     )
     assert result.exit_code == 0
     assert json.loads(result.stdout)["expected_failure_code"] == "PROFILE_REJECTED"
     human = runner.invoke(
         app,
-        ["reproduce", "run", str(bundle), "--out", str(tmp_path / "human-replay")],
+        [
+            "reproduce",
+            "run",
+            str(bundle),
+            "--out",
+            str(tmp_path / "human-replay"),
+            *target_arguments,
+        ],
     )
     assert human.exit_code == 0
     assert "Reproduced PROFILE_REJECTED: bundle" in human.stdout
     assert "replay-result.json" in human.stdout
+
+
+def test_public_command_groups_map_unexpected_failures_to_exit_five(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def crash(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("private implementation detail")
+
+    specification = tmp_path / "qualification.yaml"
+    specification.write_text("kind: Qualification\n", encoding="utf-8")
+
+    class CrashingQualificationRunner:
+        run = crash
+
+    monkeypatch.setattr(
+        "upgrade_guard.orchestrator.FullQualificationRunner",
+        CrashingQualificationRunner,
+    )
+    qualified = runner.invoke(
+        app,
+        ["qualify", str(specification), "--out", str(tmp_path / "run"), "--json"],
+    )
+    assert qualified.exit_code == 5
+    assert json.loads(qualified.stdout)["error_code"] == "INTERNAL_TOOL_FAILURE"
+    assert "private implementation detail" not in qualified.stdout
+
+    stored = tmp_path / "stored"
+    stored.mkdir()
+    monkeypatch.setattr("upgrade_guard.qualification.compare_stored_run", crash)
+    compared = runner.invoke(app, ["compare", str(stored), "--json"])
+    assert compared.exit_code == 5
+    assert json.loads(compared.stdout)["error_code"] == "INTERNAL_TOOL_FAILURE"
+
+    monkeypatch.setattr("upgrade_guard.reduce.session.reduce_failure_directory", crash)
+    reduced = runner.invoke(
+        app,
+        ["reduce", str(stored), "--out", str(tmp_path / "reduced"), "--json"],
+    )
+    assert reduced.exit_code == 5
+    assert json.loads(reduced.stdout)["error_code"] == "INTERNAL_TOOL_FAILURE"
+
+    bundle = tmp_path / "bundle.zip"
+    bundle.write_bytes(b"fixture")
+    monkeypatch.setattr("upgrade_guard.cli.verify_bundle", crash)
+    verified = runner.invoke(app, ["reproduce", "verify", str(bundle), "--json"])
+    assert verified.exit_code == 5
+    assert json.loads(verified.stdout)["error_code"] == "INTERNAL_TOOL_FAILURE"
+
+    report_directory = tmp_path / "report"
+    report_directory.mkdir()
+    report = build_report_model(
+        title="CLI report",
+        generated_at=FIXED_TIME,
+        baseline_environment_id="baseline",
+        candidate_environment_id="candidate",
+        results=(run_result(),),
+    )
+    (report_directory / "report-model.json").write_text(
+        report.model_dump_json(indent=2), encoding="utf-8"
+    )
+    monkeypatch.setattr("upgrade_guard.cli.render_text", crash)
+    rendered = runner.invoke(app, ["report", str(report_directory)])
+    assert rendered.exit_code == 5
+    assert "INTERNAL_TOOL_FAILURE" in rendered.stderr
+    assert "private implementation detail" not in rendered.stderr

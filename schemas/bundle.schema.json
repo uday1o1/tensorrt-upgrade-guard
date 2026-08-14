@@ -35,6 +35,29 @@
       "title": "ArtifactReference",
       "type": "object"
     },
+    "CudaArchitectureBuild": {
+      "additionalProperties": false,
+      "description": "Original GPU architecture bound to replay-time CUDA compilation.",
+      "properties": {
+        "cmake_cuda_architecture": {
+          "pattern": "^[1-9][0-9]+$",
+          "title": "Cmake Cuda Architecture",
+          "type": "string"
+        },
+        "original_compute_capability": {
+          "maxLength": 8,
+          "minLength": 3,
+          "title": "Original Compute Capability",
+          "type": "string"
+        }
+      },
+      "required": [
+        "original_compute_capability",
+        "cmake_cuda_architecture"
+      ],
+      "title": "CudaArchitectureBuild",
+      "type": "object"
+    },
     "FailureCode": {
       "description": "Stable V1 qualification failure taxonomy.",
       "enum": [
@@ -184,6 +207,56 @@
       "title": "FailureRecord",
       "type": "object"
     },
+    "LocalWorkerBuild": {
+      "additionalProperties": false,
+      "description": "Hash-bound recipe for rebuilding the worker without a published worker image.",
+      "properties": {
+        "base_image": {
+          "maxLength": 512,
+          "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$",
+          "title": "Base Image",
+          "type": "string"
+        },
+        "base_image_manifest_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Base Image Manifest Digest",
+          "type": "string"
+        },
+        "build_arguments": {
+          "items": {
+            "$ref": "#/$defs/WorkerBuildArgument"
+          },
+          "title": "Build Arguments",
+          "type": "array"
+        },
+        "cuda_architecture": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CudaArchitectureBuild"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dockerfile": {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        "worker_lock": {
+          "$ref": "#/$defs/ArtifactReference"
+        }
+      },
+      "required": [
+        "base_image",
+        "base_image_manifest_digest",
+        "dockerfile",
+        "worker_lock",
+        "build_arguments"
+      ],
+      "title": "LocalWorkerBuild",
+      "type": "object"
+    },
     "Phase": {
       "description": "Stable qualification phases.",
       "enum": [
@@ -214,6 +287,41 @@
       "title": "PrecisionMode",
       "type": "string"
     },
+    "ReplayRequirements": {
+      "additionalProperties": false,
+      "description": "Portable target requirements independent of the original GPU identity.",
+      "properties": {
+        "minimum_compute_capability": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "title": "Minimum Compute Capability",
+          "type": "string"
+        },
+        "minimum_driver": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Minimum Driver",
+          "type": "string"
+        },
+        "minimum_vram_mib": {
+          "exclusiveMinimum": 0,
+          "title": "Minimum Vram Mib",
+          "type": "integer"
+        },
+        "platform": {
+          "const": "linux/amd64",
+          "default": "linux/amd64",
+          "title": "Platform",
+          "type": "string"
+        }
+      },
+      "required": [
+        "minimum_compute_capability",
+        "minimum_driver",
+        "minimum_vram_mib"
+      ],
+      "title": "ReplayRequirements",
+      "type": "object"
+    },
     "SourceBuildRequest": {
       "additionalProperties": false,
       "description": "Source code that requires explicit operator trust before compilation.",
@@ -225,9 +333,32 @@
           "title": "Command",
           "type": "array"
         },
-        "selected_gpu_uuid": {
-          "title": "Selected Gpu Uuid",
+        "cuda_architecture": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CudaArchitectureBuild"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "local_worker_build": {
+          "$ref": "#/$defs/LocalWorkerBuild"
+        },
+        "original_gpu_uuid": {
+          "pattern": "^GPU-[A-Fa-f0-9-]+$",
+          "title": "Original Gpu Uuid",
           "type": "string"
+        },
+        "original_worker_image_manifest_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Original Worker Image Manifest Digest",
+          "type": "string"
+        },
+        "replay_requirements": {
+          "$ref": "#/$defs/ReplayRequirements"
         },
         "sources": {
           "items": {
@@ -235,20 +366,40 @@
           },
           "title": "Sources",
           "type": "array"
-        },
-        "worker_image_manifest_digest": {
-          "pattern": "^sha256:[0-9a-f]{64}$",
-          "title": "Worker Image Manifest Digest",
-          "type": "string"
         }
       },
       "required": [
         "sources",
-        "worker_image_manifest_digest",
-        "selected_gpu_uuid",
+        "original_worker_image_manifest_digest",
+        "original_gpu_uuid",
+        "replay_requirements",
+        "local_worker_build",
         "command"
       ],
       "title": "SourceBuildRequest",
+      "type": "object"
+    },
+    "WorkerBuildArgument": {
+      "additionalProperties": false,
+      "description": "One reviewed Docker build argument without shell interpretation.",
+      "properties": {
+        "name": {
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "WorkerBuildArgument",
       "type": "object"
     }
   },

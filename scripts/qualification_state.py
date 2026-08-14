@@ -13,178 +13,28 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-MARKER_SCHEMA = "upgradeguard.dev/qualification-step/v2"
+from upgrade_guard.gates import (
+    DOMAIN_FAILURE_STEPS,
+    MARKER_SCHEMA,
+    MODE_STEPS,
+    STEP_ALIASES,
+    STEP_DEPENDENCIES,
+    STEP_OWNED_PATHS,
+)
+
 MODES = ("full", "smoke", "sanitizer")
 _RESERVED_STATE_ROOTS = frozenset({"done", "stale", "diagnostics"})
-
-# Alternative public names normalize to one authority owner and one marker.
-STEP_ALIASES: dict[str, str] = {
-    "plugin-compile-test": "plugin-build",
-    "reduction-replay": "reduction-validation",
-}
-
-# The values are active paths relative to one source-run state root. A trailing slash
-# denotes a required nonempty directory; every other value denotes a required file.
-STEP_OWNED_PATHS: dict[str, tuple[str, ...]] = {
-    "preflight": ("source.commit", "gpu.uuid", "gpu-preflight.csv"),
-    "cpu-verify": (),
-    "gpu-runtime-preflight": ("gpu-runtime-preflight.json",),
-    "registry-bootstrap": ("registry-identity.json",),
-    "capacity-preflight": ("capacity/",),
-    "worker-images": ("worker-images.json",),
-    "matrix-lock": ("matrix.yaml", "full.yaml", "matrix.lock.json"),
-    "corpus-materialization": ("corpora.json",),
-    "plugin-build": ("plugin-build/",),
-    "target-readiness": ("target-readiness/",),
-    "profiler-preflight": ("profiler-preflight/",),
-    "aa-pilot": ("aa/",),
-    "core-qualification": ("core-run/",),
-    "gpu-smoke": ("smoke/",),
-    "plugin-benchmark": ("plugin-benchmark/",),
-    "plugin-matrix": ("plugin-runs/",),
-    "mobilenet-matrix": ("mobilenet-runs/",),
-    "fault-inputs": ("fault-inputs/",),
-    "gpu-faults": ("gpu-faults/",),
-    "reduction-prepare": ("reductions/prepared/",),
-    "replay-G2": ("reductions/G2/",),
-    "replay-G7": ("reductions/G7/",),
-    "reduction-validation": ("reductions/validation.json",),
-    "memory-seed": ("memory-seed/",),
-    "sanitizers": ("sanitizers/",),
-    "profiles": ("profiles/",),
-    "sboms": ("sbom/",),
-    "dependency-audit": ("supply-chain/",),
-    "final-evidence": ("results.json", "report-model.json", "report.md", "evidence.json"),
-    "terminal-cleanup": ("cleanup.json",),
-}
-
-# Direct dependency edges only. Final evidence expands to every required pre-final
-# marker for its mode through _dependencies_for().
-STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    "preflight": (),
-    "cpu-verify": ("preflight",),
-    "gpu-runtime-preflight": ("cpu-verify",),
-    "registry-bootstrap": ("cpu-verify",),
-    "capacity-preflight": ("preflight", "registry-bootstrap"),
-    "dependency-audit": ("cpu-verify",),
-    "corpus-materialization": (
-        "gpu-runtime-preflight",
-        "capacity-preflight",
-    ),
-    "worker-images": (
-        "cpu-verify",
-        "registry-bootstrap",
-        "capacity-preflight",
-    ),
-    "matrix-lock": ("worker-images", "gpu-runtime-preflight"),
-    "plugin-build": ("matrix-lock", "corpus-materialization"),
-    "target-readiness": ("plugin-build", "matrix-lock", "corpus-materialization"),
-    "profiler-preflight": ("plugin-build",),
-    "aa-pilot": ("matrix-lock", "corpus-materialization"),
-    "core-qualification": ("aa-pilot", "matrix-lock", "corpus-materialization"),
-    "gpu-smoke": ("matrix-lock", "corpus-materialization", "plugin-build"),
-    "plugin-benchmark": ("plugin-build", "profiler-preflight"),
-    "plugin-matrix": ("matrix-lock", "corpus-materialization", "plugin-build"),
-    "mobilenet-matrix": ("matrix-lock", "corpus-materialization"),
-    "fault-inputs": ("corpus-materialization",),
-    "gpu-faults": (
-        "matrix-lock",
-        "core-qualification",
-        "plugin-matrix",
-        "fault-inputs",
-        "plugin-build",
-        "corpus-materialization",
-    ),
-    "reduction-prepare": (
-        "gpu-faults",
-        "core-qualification",
-        "plugin-matrix",
-        "matrix-lock",
-        "corpus-materialization",
-    ),
-    "replay-G2": ("reduction-prepare",),
-    "replay-G7": ("reduction-prepare",),
-    "reduction-validation": ("reduction-prepare", "replay-G2", "replay-G7"),
-    "memory-seed": (
-        "gpu-faults",
-        "fault-inputs",
-        "plugin-build",
-        "corpus-materialization",
-    ),
-    "sanitizers": ("plugin-build", "matrix-lock"),
-    "profiles": (
-        "profiler-preflight",
-        "plugin-build",
-        "plugin-benchmark",
-        "matrix-lock",
-    ),
-    "sboms": ("worker-images", "matrix-lock"),
-    "final-evidence": (),
-    "terminal-cleanup": ("final-evidence",),
-}
-
-MODE_STEPS: dict[str, tuple[str, ...]] = {
-    "full": (
-        "preflight",
-        "cpu-verify",
-        "gpu-runtime-preflight",
-        "dependency-audit",
-        "registry-bootstrap",
-        "capacity-preflight",
-        "corpus-materialization",
-        "worker-images",
-        "matrix-lock",
-        "plugin-build",
-        "profiler-preflight",
-        "target-readiness",
-        "sanitizers",
-        "sboms",
-        "aa-pilot",
-        "core-qualification",
-        "plugin-benchmark",
-        "plugin-matrix",
-        "mobilenet-matrix",
-        "fault-inputs",
-        "gpu-faults",
-        "reduction-prepare",
-        "replay-G2",
-        "replay-G7",
-        "reduction-validation",
-        "memory-seed",
-        "profiles",
-        "final-evidence",
-        "terminal-cleanup",
-    ),
-    "smoke": (
-        "preflight",
-        "cpu-verify",
-        "gpu-runtime-preflight",
-        "registry-bootstrap",
-        "capacity-preflight",
-        "corpus-materialization",
-        "worker-images",
-        "matrix-lock",
-        "plugin-build",
-        "gpu-smoke",
-    ),
-    "sanitizer": (
-        "preflight",
-        "cpu-verify",
-        "gpu-runtime-preflight",
-        "registry-bootstrap",
-        "capacity-preflight",
-        "corpus-materialization",
-        "worker-images",
-        "matrix-lock",
-        "plugin-build",
-        "sanitizers",
-    ),
+DOMAIN_OUTCOME_JSON: dict[str, str] = {
+    "core-qualification": "core-run/qualification-summary.json",
+    "plugin-matrix": "plugin-runs/validation.json",
+    "mobilenet-matrix": "mobilenet-runs/validation.json",
 }
 
 # These paths were already semantic gates in marker v1. They remain a second
 # line of defense in addition to exact file inventory.
 PASSING_JSON: dict[str, tuple[str, ...]] = {
     "dependency-audit": ("supply-chain/triage.json",),
+    "matrix-live-verification": ("matrix-live-verification.json",),
     "target-readiness": ("target-readiness/validation.json",),
     "profiler-preflight": ("profiler-preflight/validation.json",),
     "aa-pilot": ("aa/validation.json",),
@@ -209,7 +59,7 @@ PASSING_JSON: dict[str, tuple[str, ...]] = {
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("record", "verify", "reconcile"):
+    for command in ("record", "verify", "reconcile", "inspect-outcome"):
         child = subparsers.add_parser(command)
         child.add_argument("--state", type=Path, required=True)
         child.add_argument("--project", type=Path, required=True)
@@ -218,6 +68,7 @@ def main() -> int:
         child.add_argument("--source", required=True)
         child.add_argument("--gpu", required=True)
         child.add_argument("--mode", choices=MODES, required=True)
+        child.add_argument("--qualification-spec", type=Path, required=True)
         if command == "reconcile":
             child.add_argument("--dry-run", action="store_true")
     corpus = subparsers.add_parser("verify-corpus")
@@ -267,10 +118,18 @@ def main() -> int:
             source=arguments.source,
             gpu=arguments.gpu,
             mode=arguments.mode,
+            qualification_spec=arguments.qualification_spec,
             dry_run=arguments.dry_run,
         )
         print(json.dumps(result, allow_nan=False, indent=2, sort_keys=True))
         return 0
+    if arguments.command == "inspect-outcome":
+        try:
+            outcome = _validate_step_outcome(state, arguments.step)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return 4
+        print(outcome)
+        return 1 if outcome == "failed" else 0
     if arguments.command == "record":
         record_marker(
             state,
@@ -279,6 +138,7 @@ def main() -> int:
             arguments.source,
             arguments.gpu,
             arguments.mode,
+            qualification_spec=arguments.qualification_spec,
         )
         return 0
     return (
@@ -290,6 +150,7 @@ def main() -> int:
             arguments.source,
             arguments.gpu,
             arguments.mode,
+            qualification_spec=arguments.qualification_spec,
         )
         else 1
     )
@@ -302,15 +163,33 @@ def record_marker(
     source: str,
     gpu: str,
     mode: str,
+    *,
+    qualification_spec: Path | None = None,
 ) -> dict[str, Any]:
-    """Validate direct dependencies and atomically publish one marker v2."""
+    """Validate direct dependencies and atomically publish one marker v3."""
 
     canonical = _canonical_step(step)
     _require_mode_step(canonical, mode)
-    for dependency in _dependencies_for(canonical, mode):
-        if not verify_marker(state, project, dependency, source, gpu, mode):
+    for dependency in _dependencies_for(canonical, mode, state=state):
+        if not verify_marker(
+            state,
+            project,
+            dependency,
+            source,
+            gpu,
+            mode,
+            qualification_spec=qualification_spec,
+        ):
             raise ValueError(f"direct dependency marker is invalid: {dependency}")
-    payload = _payload(state, project, step, source, gpu, mode)
+    payload = _payload(
+        state,
+        project,
+        step,
+        source,
+        gpu,
+        mode,
+        qualification_spec=qualification_spec,
+    )
     _write_atomic(_marker_path(state, canonical), payload)
     return payload
 
@@ -323,6 +202,7 @@ def verify_marker(
     gpu: str,
     mode: str,
     *,
+    qualification_spec: Path | None = None,
     _memo: dict[str, bool] | None = None,
 ) -> bool:
     """Verify a marker, its owned inventory, and its dependency chain."""
@@ -336,7 +216,7 @@ def verify_marker(
     if canonical in memo:
         return memo[canonical]
     memo[canonical] = False
-    for dependency in _dependencies_for(canonical, mode):
+    for dependency in _dependencies_for(canonical, mode, state=state):
         if not verify_marker(
             state,
             project,
@@ -344,13 +224,22 @@ def verify_marker(
             source,
             gpu,
             mode,
+            qualification_spec=qualification_spec,
             _memo=memo,
         ):
             return False
     try:
         marker = _marker_path(state, canonical)
         observed = _read_json_object(marker)
-        expected = _payload(state, project, step, source, gpu, mode)
+        expected = _payload(
+            state,
+            project,
+            step,
+            source,
+            gpu,
+            mode,
+            qualification_spec=qualification_spec,
+        )
     except (OSError, ValueError, json.JSONDecodeError):
         return False
     valid = observed == expected
@@ -365,16 +254,18 @@ def _payload(
     source: str,
     gpu: str,
     mode: str,
+    *,
+    qualification_spec: Path | None = None,
 ) -> dict[str, Any]:
-    """Build the deterministic marker v2 payload for one step."""
+    """Build the deterministic marker v3 payload for one step."""
 
     canonical = _canonical_step(step)
     _require_mode_step(canonical, mode)
     inventory = _inventory_owned(state, canonical, invoked_step=step)
-    _validate_passing_json(state, canonical)
+    outcome = _validate_step_outcome(state, canonical)
     dependency_hashes = {
         dependency: _sha256(_marker_path(state, dependency))
-        for dependency in _dependencies_for(canonical, mode)
+        for dependency in _dependencies_for(canonical, mode, state=state)
     }
     matrix_lock_sha256 = _matrix_binding(state) if _is_matrix_bound(canonical, mode) else None
     corpus_identities = (
@@ -387,16 +278,23 @@ def _payload(
         if _is_corpus_bound(canonical, mode)
         else []
     )
+    qualification_spec_lineage = (
+        _qualification_spec_lineage(state, project, qualification_spec)
+        if _is_matrix_bound(canonical, mode)
+        else None
+    )
     return {
         "schema_version": MARKER_SCHEMA,
         "step": canonical,
         "source_git_commit": source,
         "gpu_uuid": gpu,
         "mode": mode,
+        "outcome": outcome,
         "inventory": inventory,
         "direct_dependency_marker_sha256s": dependency_hashes,
         "matrix_lock_sha256": matrix_lock_sha256,
         "corpus_identities": corpus_identities,
+        "qualification_spec_lineage": qualification_spec_lineage,
     }
 
 
@@ -407,6 +305,7 @@ def reconcile(
     source: str,
     gpu: str,
     mode: str,
+    qualification_spec: Path | None = None,
     dry_run: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -416,7 +315,7 @@ def reconcile(
     validity: dict[str, bool] = {}
     for step in order:
         dependencies_valid = all(
-            validity[dependency] for dependency in _dependencies_for(step, mode)
+            validity[dependency] for dependency in _dependencies_for(step, mode, state=state)
         )
         validity[step] = dependencies_valid and verify_marker(
             state,
@@ -425,6 +324,7 @@ def reconcile(
             source,
             gpu,
             mode,
+            qualification_spec=qualification_spec,
         )
     invalid = [step for step in order if not validity[step]]
     lineage = _observed_lineage(state, source)
@@ -573,15 +473,160 @@ def _reject_symlink_parents(state: Path, path: Path) -> None:
             raise ValueError(f"owned path has a symlink parent: {current.relative_to(state)}")
 
 
-def _validate_passing_json(state: Path, step: str) -> None:
+def _validate_step_outcome(state: Path, step: str) -> str:
+    if step == "public-failure":
+        from upgrade_guard.reduce.public_failure import validate_public_failure_disposition
+
+        validate_public_failure_disposition(state / "public-failure", state=state)
+        return "passed"
+    if step in DOMAIN_OUTCOME_JSON:
+        value = _read_json_object(state / DOMAIN_OUTCOME_JSON[step])
+        if step == "core-qualification":
+            return _validate_core_outcome(state, value)
+        return _validate_extended_outcome(state, value, step=step)
     for relative in PASSING_JSON.get(step, ()):
         value = _read_json_object(state / relative)
-        if value.get("status") != "passed":
+        status = value.get("status")
+        if step == "final-evidence" and status == "failed":
+            continue
+        if status != "passed":
             raise ValueError(f"required JSON did not pass: {state / relative}")
     if step == "aa-pilot":
         value = _read_json_object(state / "aa" / "validation.json")
         if value.get("false_positive") is not False or value.get("accepted_pairs") != 20:
             raise ValueError("A/A pilot did not retain exactly 20 passing pairs")
+    return "failed" if step == "final-evidence" and _publication_failed(state) else "passed"
+
+
+def _validate_core_outcome(state: Path, value: dict[str, Any]) -> str:
+    from upgrade_guard.classify import exit_code_for_failure
+    from upgrade_guard.contracts.common import ResultStatus
+    from upgrade_guard.contracts.environment import MatrixLock
+    from upgrade_guard.errors import ExitCode, FailureCode
+
+    if value.get("status") == "passed":
+        return "passed"
+    if value.get("schema_version") != "upgradeguard.dev/qualification-summary/v1":
+        raise ValueError("core qualification summary schema changed")
+    try:
+        status_value = value.get("status")
+        if not isinstance(status_value, str):
+            raise ValueError("core qualification status is malformed")
+        status = ResultStatus(status_value)
+        codes = tuple(FailureCode(item) for item in value.get("failure_codes", ()))
+        started = datetime.fromisoformat(value["started_at"])
+        ended = datetime.fromisoformat(value["ended_at"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("core qualification summary is malformed") from error
+    if started.tzinfo is None or ended.tzinfo is None or ended < started:
+        raise ValueError("core qualification timestamps are invalid")
+    matrix = MatrixLock.model_validate_json(
+        (state / "matrix.lock.json").read_text(encoding="utf-8")
+    )
+    if (
+        matrix.computed_sha256() != matrix.lock_sha256
+        or value.get("environment_lock_sha256") != matrix.lock_sha256
+        or value.get("gpu_uuid") != matrix.gpu_uuid
+        or len(codes) != len(set(codes))
+    ):
+        raise ValueError("core qualification identity differs from its matrix lock")
+    if status is ResultStatus.PASSED and not codes:
+        return "passed"
+    if (
+        status is ResultStatus.FAILED
+        and codes
+        and all(exit_code_for_failure(code) is ExitCode.QUALIFICATION_FAILED for code in codes)
+    ):
+        return "failed"
+    raise ValueError("core qualification is not a completed domain decision")
+
+
+def _validate_extended_outcome(state: Path, value: dict[str, Any], *, step: str) -> str:
+    from pydantic import ValidationError
+
+    from scripts.three_way_validation import ThreeWayValidationResult
+    from upgrade_guard.classify import exit_code_for_failure
+    from upgrade_guard.contracts.common import ResultStatus
+    from upgrade_guard.errors import ExitCode
+
+    if value.get("status") == "passed":
+        return "passed"
+    try:
+        result = ThreeWayValidationResult.model_validate(value)
+    except ValidationError as error:
+        raise ValueError(f"{step} validation is malformed") from error
+    if result.status is ResultStatus.PASSED:
+        return "passed"
+    if (
+        result.status is ResultStatus.FAILED
+        and result.failure is not None
+        and result.failure_code is result.failure.code
+        and exit_code_for_failure(result.failure.code) is ExitCode.QUALIFICATION_FAILED
+    ):
+        _validate_extended_failure_artifacts(state, step=step, result=result)
+        return "failed"
+    raise ValueError(f"{step} is not a completed domain decision")
+
+
+def _validate_extended_failure_artifacts(
+    state: Path,
+    *,
+    step: str,
+    result: Any,
+) -> None:
+    from upgrade_guard.contracts.common import ArtifactReference, Phase
+
+    failure = result.failure
+    if failure is None or not isinstance(failure.environment_id, str):
+        raise ValueError(f"{step} failure lacks an environment identity")
+    root_name = "plugin-runs" if step == "plugin-matrix" else "mobilenet-runs"
+    root = (state / root_name).resolve(strict=True)
+    chains = []
+    for case in result.cases:
+        stable = case.get("stable_artifacts") if isinstance(case, dict) else None
+        if isinstance(stable, dict) and isinstance(stable.get(failure.environment_id), dict):
+            chains.append(stable[failure.environment_id])
+    if len(chains) != 1:
+        raise ValueError(f"{step} failure lacks one exact failed stable artifact chain")
+    chain = chains[0]
+    required: tuple[str, ...] = ("case_manifest", "build_manifest")
+    if failure.phase is not Phase.BUILD:
+        required += ("run_result",)
+    for name in required:
+        try:
+            artifact = ArtifactReference.model_validate(chain[name])
+            path = root / artifact.path
+            resolved = path.resolve(strict=True)
+        except (KeyError, OSError, ValueError) as error:
+            raise ValueError(f"{step} failed stable artifact is invalid: {name}") from error
+        if (
+            not resolved.is_relative_to(root)
+            or path.is_symlink()
+            or not resolved.is_file()
+            or resolved.stat().st_size != artifact.bytes
+            or _sha256(resolved) != artifact.sha256
+        ):
+            raise ValueError(f"{step} failed stable artifact identity differs: {name}")
+    if failure.phase is Phase.BUILD and chain.get("run_result") is not None:
+        raise ValueError(f"{step} build failure cannot claim a run result")
+
+
+def _publication_failed(state: Path) -> bool:
+    statuses = {
+        _read_json_object(state / relative).get("status")
+        for relative in PASSING_JSON["final-evidence"]
+    }
+    if len(statuses) != 1:
+        raise ValueError("published result and evidence statuses differ")
+    failed = statuses == {"failed"}
+    if failed:
+        report_model = _read_json_object(state / "report-model.json")
+        report_text = (state / "report.md").read_text(encoding="utf-8")
+        if report_model.get("status") != "failed" or "qualification failure" not in (
+            report_text.casefold()
+        ):
+            raise ValueError("failed publication report does not retain its failed decision")
+    return failed
 
 
 def _matrix_binding(state: Path) -> str:
@@ -597,6 +642,64 @@ def _matrix_binding(state: Path) -> str:
     return lock.lock_sha256
 
 
+def _qualification_spec_lineage(
+    state: Path,
+    project: Path,
+    qualification_spec: Path | None,
+) -> dict[str, str]:
+    """Bind matrix-derived state to its original and locked specifications."""
+
+    source = _qualification_spec_path(state, project, qualification_spec)
+    locked = state / "full.yaml"
+    try:
+        source_stat = source.lstat()
+        locked_stat = locked.lstat()
+    except OSError as error:
+        raise ValueError("qualification specification lineage is incomplete") from error
+    if not stat.S_ISREG(source_stat.st_mode) or not stat.S_ISREG(locked_stat.st_mode):
+        raise ValueError("qualification specification lineage requires regular files")
+    if source.is_symlink() or locked.is_symlink():
+        raise ValueError("qualification specification lineage cannot contain symlinks")
+    return {
+        "resolved_path": str(source),
+        "source_sha256": _sha256(source),
+        "locked_sha256": _sha256(locked),
+    }
+
+
+def _qualification_spec_path(
+    state: Path,
+    project: Path,
+    qualification_spec: Path | None,
+) -> Path:
+    if qualification_spec is not None:
+        candidate = qualification_spec.resolve(strict=True)
+    else:
+        observed = _qualification_spec_path_from_marker(state)
+        candidate = (
+            observed
+            if observed is not None
+            else (project / "qualification" / "full.yaml").resolve(strict=True)
+        )
+    if not candidate.is_file():
+        raise ValueError("qualification specification must be a regular file")
+    return candidate
+
+
+def _qualification_spec_path_from_marker(state: Path) -> Path | None:
+    try:
+        marker = _read_json_object(_marker_path(state, "matrix-lock"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    lineage = marker.get("qualification_spec_lineage")
+    if not isinstance(lineage, dict):
+        return None
+    resolved_path = lineage.get("resolved_path")
+    if not isinstance(resolved_path, str) or not Path(resolved_path).is_absolute():
+        return None
+    return Path(resolved_path).resolve(strict=True)
+
+
 def _corpus_identities(
     state: Path,
     project: Path,
@@ -607,6 +710,17 @@ def _corpus_identities(
     value = _read_json_object(state / "corpora.json")
     if value.get("schema_version") != "upgradeguard.dev/corpus-index/v1":
         raise ValueError("corpora.json has an unsupported schema")
+    if set(value) != {
+        "schema_version",
+        "reference_environment_sha256",
+        "corpora",
+    }:
+        raise ValueError("corpora.json has unexpected fields")
+    reference_environment_sha256 = value.get("reference_environment_sha256")
+    if not isinstance(reference_environment_sha256, str) or not _is_sha256(
+        reference_environment_sha256
+    ):
+        raise ValueError("corpora.json lacks a reference environment identity")
     corpora = value.get("corpora")
     if not isinstance(corpora, dict) or not corpora:
         raise ValueError("corpora.json must contain a nonempty corpora mapping")
@@ -623,6 +737,7 @@ def _corpus_identities(
         "lock_sha256",
         "materializer_sha256",
         "inventory_sha256",
+        "reference_environment_sha256",
     }
     for kind, corpus in sorted(corpora.items()):
         if not isinstance(kind, str) or not kind or not isinstance(corpus, dict):
@@ -634,7 +749,15 @@ def _corpus_identities(
         lock_sha256 = corpus.get("lock_sha256")
         materializer_sha256 = corpus.get("materializer_sha256")
         inventory_sha256 = corpus.get("inventory_sha256")
-        values = (root, lock, lock_sha256, materializer_sha256, inventory_sha256)
+        corpus_reference_sha256 = corpus.get("reference_environment_sha256")
+        values = (
+            root,
+            lock,
+            lock_sha256,
+            materializer_sha256,
+            inventory_sha256,
+            corpus_reference_sha256,
+        )
         if not all(isinstance(item, str) and item for item in values):
             raise ValueError(f"corpus index entry is incomplete: {kind}")
         assert isinstance(root, str)
@@ -642,6 +765,7 @@ def _corpus_identities(
         assert isinstance(lock_sha256, str)
         assert isinstance(materializer_sha256, str)
         assert isinstance(inventory_sha256, str)
+        assert isinstance(corpus_reference_sha256, str)
         root_path = PurePosixPath(root)
         lock_path = PurePosixPath(lock)
         if (
@@ -652,9 +776,16 @@ def _corpus_identities(
             raise ValueError(f"corpus index paths are unsafe: {kind}")
         if not all(
             _is_sha256(identity)
-            for identity in (lock_sha256, materializer_sha256, inventory_sha256)
+            for identity in (
+                lock_sha256,
+                materializer_sha256,
+                inventory_sha256,
+                corpus_reference_sha256,
+            )
         ):
             raise ValueError("corpus lock, materializer, and inventory identities must be SHA-256")
+        if corpus_reference_sha256 != reference_environment_sha256:
+            raise ValueError("corpus reference environment identity differs from its index")
         if verify_contents:
             resolved_root = (project / root).resolve(strict=True)
             resolved_lock = (project / lock).resolve(strict=True)
@@ -680,6 +811,7 @@ def _corpus_identities(
                 "lock_sha256": lock_sha256,
                 "materializer_sha256": materializer_sha256,
                 "inventory_sha256": inventory_sha256,
+                "reference_environment_sha256": corpus_reference_sha256,
             }
         )
     return identities
@@ -828,14 +960,40 @@ def _public_step_names() -> tuple[str, ...]:
     return tuple(sorted((*STEP_OWNED_PATHS, *STEP_ALIASES)))
 
 
-def _dependencies_for(step: str, mode: str) -> tuple[str, ...]:
+def _dependencies_for(step: str, mode: str, *, state: Path | None = None) -> tuple[str, ...]:
+    if step == "public-failure":
+        if state is None:
+            return DOMAIN_FAILURE_STEPS
+        failed = _failed_step_from_markers(state, DOMAIN_FAILURE_STEPS)
+        if failed is None:
+            return ()
+        return (failed,)
     if step == "final-evidence":
-        return tuple(
+        candidates = tuple(
             candidate
             for candidate in MODE_STEPS[mode]
-            if candidate not in {"final-evidence", "terminal-cleanup"}
+            if candidate not in {"public-failure", "final-evidence", "terminal-cleanup"}
         )
+        if state is not None:
+            failed = _failed_step_from_markers(state, candidates)
+            if failed is not None:
+                return (*candidates[: candidates.index(failed) + 1], "public-failure")
+        return candidates
     return STEP_DEPENDENCIES[step]
+
+
+def _failed_step_from_markers(state: Path, candidates: tuple[str, ...]) -> str | None:
+    failed = []
+    for step in candidates:
+        try:
+            marker = _read_json_object(_marker_path(state, step))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if marker.get("outcome") == "failed":
+            failed.append(step)
+    if len(failed) > 1:
+        raise ValueError("qualification retained more than one terminal failure marker")
+    return failed[0] if failed else None
 
 
 def _require_mode_step(step: str, mode: str) -> None:

@@ -19,6 +19,8 @@ def summarize_determinism(
     outputs: tuple[Array, ...],
     input_hashes: tuple[str, ...],
     policy: NumericalTolerance,
+    *,
+    input_hashes_stable: bool | None = None,
 ) -> DeterminismSummary:
     """Keep bitwise and tolerance stability as separate observations."""
 
@@ -38,6 +40,8 @@ def summarize_determinism(
         unique_output_hashes=tuple(sorted(set(hashes))),
         bitwise_stable=len(set(hashes)) == 1,
         tolerance_stable=tolerance_stable,
-        input_hashes_stable=len(set(input_hashes)) <= 1,
+        input_hashes_stable=(
+            len(set(input_hashes)) <= 1 if input_hashes_stable is None else input_hashes_stable
+        ),
         nonfinite_observed=not finite,
     )

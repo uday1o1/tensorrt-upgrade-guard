@@ -58,4 +58,5 @@ class CorpusLock(StrictModel):
     kind: Literal["CorpusLock"]
     id: str
     recipe_sha256: Sha256Digest
+    reference_environment_sha256: Sha256Digest
     artifacts: tuple[MaterializedArtifact, ...]

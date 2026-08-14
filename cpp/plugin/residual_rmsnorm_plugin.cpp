@@ -6,15 +6,53 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace upgrade_guard
 {
+#if defined(UPGRADE_GUARD_FAULT_OMIT_RESIDUAL_HIDDEN)
+cudaError_t launchResidualRmsNormOmitResidual(nvinfer1::DataType type, void const* x,
+    float const* gamma, void* output, std::int64_t rows, std::int32_t hidden, float epsilon,
+    cudaStream_t stream) noexcept;
+#endif
 namespace
 {
+
+char const* tacticName(std::int32_t tactic) noexcept
+{
+    return tactic == static_cast<std::int32_t>(ResidualRmsNormTactic::kVectorizedWarp)
+        ? "kVECTORIZED_WARP"
+        : "kSCALAR_REFERENCE";
+}
+
+void recordTacticDiagnostic(
+    char const* event, std::int32_t tactic, std::int64_t rows, std::int32_t hidden) noexcept
+{
+    char const* path = std::getenv("UPGRADE_GUARD_TACTIC_DIAGNOSTIC");
+    if (path == nullptr || path[0] == '\0')
+    {
+        return;
+    }
+    try
+    {
+        static std::mutex mutex;
+        std::lock_guard<std::mutex> lock(mutex);
+        std::ofstream stream(path, std::ios::app);
+        stream << "{\"schema_version\":\"upgradeguard.dev/plugin-tactic/v1\",\"event\":\""
+               << event << "\",\"tactic\":\"" << tacticName(tactic) << "\",\"rows\":"
+               << rows << ",\"hidden\":" << hidden << "}\n";
+    }
+    catch (...)
+    {
+        // Diagnostic I/O must never change plugin execution semantics.
+    }
+}
 
 bool dimensionsEqual(nvinfer1::Dims const& first, nvinfer1::Dims const& second) noexcept
 {
@@ -249,6 +287,11 @@ std::int32_t ResidualRmsNormPlugin::setTactic(std::int32_t tactic) noexcept
         return -1;
     }
     mTactic = tactic;
+    char metadata[192]{};
+    std::snprintf(metadata, sizeof(metadata), "%s;tactic=%s;rows=%lld;hidden=%d",
+        mTimingCacheId.c_str(), tacticName(mTactic), static_cast<long long>(mRows), mHidden);
+    mMetadata = metadata;
+    recordTacticDiagnostic("set_tactic", mTactic, mRows, mHidden);
     return 0;
 }
 
@@ -256,7 +299,12 @@ std::int32_t ResidualRmsNormPlugin::onShapeChange(nvinfer1::PluginTensorDesc con
     std::int32_t nbInputs, nvinfer1::PluginTensorDesc const* outputs,
     std::int32_t nbOutputs) noexcept
 {
-    return validateRuntimeShapes(inputs, nbInputs, outputs, nbOutputs) ? 0 : -1;
+    if (!validateRuntimeShapes(inputs, nbInputs, outputs, nbOutputs))
+    {
+        return -1;
+    }
+    recordTacticDiagnostic("shape", mTactic, mRows, mHidden);
+    return 0;
 }
 
 std::int32_t ResidualRmsNormPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
@@ -269,7 +317,16 @@ std::int32_t ResidualRmsNormPlugin::enqueue(nvinfer1::PluginTensorDesc const* in
     {
         return -1;
     }
+    recordTacticDiagnostic("enqueue", mTactic, mRows, mHidden);
     cudaError_t result{cudaErrorInvalidValue};
+#if defined(UPGRADE_GUARD_FAULT_OMIT_RESIDUAL_HIDDEN)
+    if (mHidden == UPGRADE_GUARD_FAULT_OMIT_RESIDUAL_HIDDEN)
+    {
+        result = launchResidualRmsNormOmitResidual(inputDesc[0].type, inputs[0],
+            static_cast<float const*>(inputs[2]), outputs[0], mRows, mHidden, mEpsilon, stream);
+        return result == cudaSuccess ? 0 : -1;
+    }
+#endif
     if (mTactic == static_cast<std::int32_t>(ResidualRmsNormTactic::kScalarReference))
     {
         result = launchResidualRmsNormScalar(inputDesc[0].type, inputs[0], inputs[1],

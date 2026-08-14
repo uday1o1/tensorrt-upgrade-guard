@@ -2,10 +2,14 @@ api_version: upgradeguard.dev/v1alpha1
 kind: Qualification
 baseline_environment_id: baseline
 candidate_environment_id: candidate
+environment_matrix: ../matrices/examples/controlled-minor.yaml
 environment_lock: ../.upgrade-guard/matrix.lock.json
+reference_environment_lock: ../.upgrade-guard/reference-environment.lock.json
 corpus_lock_id: v1-core
 required_cases:
   - tiny-transformer
+  - residual-rmsnorm-plugin
+  - mobilenetv3-small-075
 precision_modes:
   - fp32
   - explicit_fp16
@@ -50,8 +54,8 @@ numerical:
   candidate_to_reference: {atol: 0.00001, rtol: 0.0001}
   candidate_to_baseline: {atol: 0.00001, rtol: 0.0001}
   relative_error_guard: 0.000000000001
-  require_top1_agreement: false
-  require_top5_agreement: false
+  require_top1_agreement: true
+  require_top5_agreement: true
 precision_numerical:
   explicit_fp16:
     baseline_to_reference: {atol: 0.005, rtol: 0.005}

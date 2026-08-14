@@ -21,6 +21,12 @@ def sha256_file(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def sha256_bytes(value: bytes) -> str:
+    """Hash exact in-memory tensor bytes with the artifact digest format."""
+
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
 def write_json_atomic(path: Path, value: Any) -> None:
     """Publish one worker result without exposing a partial JSON document."""
 

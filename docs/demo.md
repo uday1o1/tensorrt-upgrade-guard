@@ -31,7 +31,9 @@ Explain that the script resolves exact images, compiles the plugin in both worke
 ## Show the full evidence boundary
 
 ```bash
-bash scripts/run_cuda_pm_qualification.sh
+run_root=".upgrade-guard/cuda-pm/runs/$(git rev-parse HEAD)"
+uv run --frozen upgrade-guard qualify qualification/full.yaml \
+  --project-root . --out "${run_root}"
 ```
 
 The same command resumes source-revision-specific work and ends only after correctness, determinism, unprofiled performance, seeded faults, sanitizer, profiles, SBOMs, dependency audit, and final evidence succeed.

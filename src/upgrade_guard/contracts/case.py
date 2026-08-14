@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -84,3 +85,14 @@ class CaseManifest(StrictModel):
 
     def computed_sha256(self) -> str:
         return model_sha256(self, exclude={"manifest_sha256"})
+
+
+def adapt_case_manifest(payload: Mapping[str, Any] | CaseManifest) -> CaseManifest:
+    """Validate and self-hash-check a case before binding worker evidence."""
+
+    manifest = (
+        payload if isinstance(payload, CaseManifest) else CaseManifest.model_validate(payload)
+    )
+    if manifest.computed_sha256() != manifest.manifest_sha256:
+        raise ValueError("case manifest self-hash differs")
+    return manifest

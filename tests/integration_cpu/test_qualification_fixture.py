@@ -8,10 +8,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from tests.factories import digest, resolved_image, worker_probe
-from upgrade_guard.containers.commands import CommandResult
-from upgrade_guard.contracts.base import sha256_file
+from tests.factories import (
+    digest,
+    reference_environment_lock,
+    resolved_image,
+    worker_probe,
+)
+from upgrade_guard.containers.commands import CommandResult, command_sha256
+from upgrade_guard.contracts.base import sha256_bytes, sha256_file
 from upgrade_guard.contracts.doctor import DockerDiscoveredDevice
 from upgrade_guard.contracts.environment import (
     CompatibilityEvidence,
@@ -33,12 +39,22 @@ TRTEXEC_OPTIONS = (
     "--warmUp",
     "--duration",
     "--noDataTransfers",
+    "--loadInputs",
+    "--loadInputs",
     "--infStreams",
 )
 
 
+class NoopLockVerifier:
+    def verify(self, expected: MatrixLock) -> MatrixLock:
+        return expected
+
+
 class SimulatedWorkerRunner:
     """Materialize worker outputs at the same bind-mounted paths Docker would use."""
+
+    def __init__(self, candidate_mutation: str | None = None) -> None:
+        self.candidate_mutation = candidate_mutation
 
     def run(
         self,
@@ -47,8 +63,9 @@ class SimulatedWorkerRunner:
         timeout_seconds: float = 30.0,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
+        accepted_returncodes: Sequence[int] = (0,),
     ) -> CommandResult:
-        del timeout_seconds, cwd, env
+        del timeout_seconds, cwd, env, accepted_returncodes
         command = tuple(args)
         if command[0] == "nvidia-smi":
             if any(item.startswith("--query-gpu=") for item in command):
@@ -58,7 +75,8 @@ class SimulatedWorkerRunner:
             return CommandResult(command, 0, stdout, "", 0.01)
         output = self._mount(command, "/output")
         corpus = self._mount(command, "/corpus")
-        inner = command[command.index("PYTHONPATH=/opt/upgrade-guard/src") + 2 :]
+        entrypoint = command.index("--entrypoint")
+        inner = command[entrypoint + 3 :]
         if "upgrade_guard.worker.build_engine" in inner:
             self._build(inner, output)
         elif "upgrade_guard.worker.run_correctness" in inner:
@@ -86,6 +104,27 @@ class SimulatedWorkerRunner:
         inspector = self._host_path(command[command.index("--inspector") + 1], output)
         timing_cache = self._host_path(command[command.index("--timing-cache") + 1], output)
         result = self._host_path(command[command.index("--result") + 1], output)
+        if self.candidate_mutation == "baseline-worker-build" and "/baseline/" in str(result):
+            result.parent.mkdir(parents=True, exist_ok=True)
+            result.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "upgradeguard.dev/worker-build/v1",
+                        "status": "failed",
+                        "command": list(command),
+                        "command_sha256": command_sha256(command),
+                        "failure_code": "ENGINE_BUILD_FAILED",
+                        "error_type": "RuntimeError",
+                        "message": "TensorRT engine build returned no serialized engine",
+                        "started_unix_seconds": 1.0,
+                        "ended_unix_seconds": 2.0,
+                        "duration_seconds": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return
+        cache_input = sha256_file(timing_cache) if timing_cache.is_file() else None
         for path, contents in (
             (engine, b"simulated-engine"),
             (inspector, b"{}\n"),
@@ -96,8 +135,40 @@ class SimulatedWorkerRunner:
         result.write_text(
             json.dumps(
                 {
+                    "schema_version": "upgradeguard.dev/worker-build/v1",
                     "status": "passed",
-                    "engine": {"bytes": engine.stat().st_size, "device_memory_bytes": 4096},
+                    "command": list(command),
+                    "command_sha256": command_sha256(command),
+                    "model": {
+                        "path": command[command.index("--model") + 1],
+                        "sha256": digest("a"),
+                        "bytes": 1,
+                    },
+                    "engine": {
+                        "path": command[command.index("--engine") + 1],
+                        "sha256": sha256_file(engine),
+                        "bytes": engine.stat().st_size,
+                        "device_memory_bytes": 4096,
+                    },
+                    "memory_diagnostics": {},
+                    "inspector": {
+                        "path": command[command.index("--inspector") + 1],
+                        "sha256": sha256_file(inspector),
+                        "bytes": inspector.stat().st_size,
+                    },
+                    "timing_cache": {
+                        "path": command[command.index("--timing-cache") + 1],
+                        "input_sha256": cache_input,
+                        "output_sha256": sha256_file(timing_cache),
+                        "bytes": timing_cache.stat().st_size,
+                    },
+                    "builder_configuration": {"strongly_typed": "true"},
+                    "timing_cache_state": "cold" if cache_input is None else "warm",
+                    "tensorrt_version": "11.2.1",
+                    "started_unix_seconds": 1.0,
+                    "ended_unix_seconds": 2.0,
+                    "duration_seconds": 1.0,
+                    "strongly_typed": True,
                 }
             ),
             encoding="utf-8",
@@ -108,6 +179,48 @@ class SimulatedWorkerRunner:
         output_container = command[command.index("--output") + 1]
         result = self._host_path(result_container, output)
         output_directory = self._host_path(output_container, output)
+        side = "baseline" if "/baseline/" in result_container else "candidate"
+        worker_failures = {
+            "baseline-worker-nonfinite": ("baseline", "NONFINITE_OUTPUT", False),
+            "candidate-worker-nonfinite": ("candidate", "NONFINITE_OUTPUT", False),
+            "baseline-worker-execution": ("baseline", "EXECUTION_FAILED", False),
+            "candidate-worker-execution": ("candidate", "EXECUTION_FAILED", False),
+            "baseline-worker-input-integrity": ("baseline", "EXECUTION_FAILED", True),
+        }
+        worker_failure = (
+            worker_failures.get(self.candidate_mutation)
+            if self.candidate_mutation is not None
+            else None
+        )
+        if worker_failure is not None and worker_failure[0] == side:
+            _, failure_code, input_integrity_failed = worker_failure
+            result.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict[str, object] = {
+                "schema_version": "upgradeguard.dev/worker-correctness/v1",
+                "status": "failed",
+                "command": list(command),
+                "command_sha256": command_sha256(command),
+                "failure_code": failure_code,
+                "error_type": "RuntimeError",
+                "message": (
+                    "device input changed during repetition 0: tokens"
+                    if input_integrity_failed
+                    else "output contains nonfinite values"
+                    if failure_code == "NONFINITE_OUTPUT"
+                    else "TensorRT execute_async_v3 returned false"
+                ),
+                "started_unix_seconds": 1.0,
+                "ended_unix_seconds": 2.0,
+                "duration_seconds": 1.0,
+            }
+            if input_integrity_failed:
+                payload["input_integrity_stable"] = False
+                payload["input_integrity_evidence"] = {
+                    "repetition": 0,
+                    "inputs": [],
+                }
+            result.write_text(json.dumps(payload), encoding="utf-8")
+            return
         input_arguments = [
             command[index + 1] for index, item in enumerate(command) if item == "--input"
         ]
@@ -118,33 +231,83 @@ class SimulatedWorkerRunner:
             )
             for item in input_arguments
         }
+        input_sources = {
+            item.split("=", maxsplit=1)[0]: self._host_path(
+                item.split("=", maxsplit=1)[1], corpus, "/corpus/"
+            )
+            for item in input_arguments
+        }
         model = corpus / "models" / "tiny-transformer-fp32.onnx"
         expected = run_onnx_reference(model, inputs)[0].values
+        if "/candidate/" in result_container and self.candidate_mutation == "nonfinite":
+            expected = expected.copy()
+            expected.reshape(-1)[0] = np.nan
+        elif "/candidate/" in result_container and self.candidate_mutation == "schema":
+            expected = expected[..., :-1]
         repetitions = []
         for index in range(20):
+            observed = expected
+            if (
+                "/candidate/" in result_container
+                and self.candidate_mutation == "nonfinite-late"
+                and index == 19
+            ):
+                observed = expected.copy()
+                observed.reshape(-1)[0] = np.nan
             path = output_directory / f"output-{index:02d}.npy"
             path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(path, expected, allow_pickle=False)
+            np.save(path, observed, allow_pickle=False)
             repetitions.append(
                 {
+                    "index": index,
+                    "inputs": [
+                        {
+                            "name": name,
+                            "source_sha256": sha256_file(input_sources[name]),
+                            "host_value_sha256": sha256_bytes(
+                                np.ascontiguousarray(inputs[name]).tobytes(order="C")
+                            ),
+                            "device_value_sha256": sha256_bytes(
+                                np.ascontiguousarray(inputs[name]).tobytes(order="C")
+                            ),
+                            "stable": True,
+                        }
+                        for name in sorted(inputs)
+                    ],
                     "outputs": [
                         {
                             "name": "output",
                             "path": f"{output_container}/output-{index:02d}.npy",
                             "sha256": sha256_file(path),
+                            "bytes": path.stat().st_size,
+                            "dtype": str(observed.dtype),
+                            "shape": list(observed.shape),
                         }
-                    ]
+                    ],
                 }
             )
         result.parent.mkdir(parents=True, exist_ok=True)
         result.write_text(
             json.dumps(
                 {
+                    "schema_version": "upgradeguard.dev/worker-correctness/v1",
                     "status": "passed",
+                    "command": list(command),
+                    "command_sha256": command_sha256(command),
+                    "engine_sha256": sha256_file(
+                        self._host_path(command[command.index("--engine") + 1], output)
+                    ),
                     "input_sha256": {
-                        name: digest(str(index + 1)) for index, name in enumerate(sorted(inputs))
+                        name: sha256_file(input_sources[name]) for name in sorted(inputs)
                     },
                     "repetitions": repetitions,
+                    "input_integrity_stable": True,
+                    "tactic_diagnostic": None,
+                    "memory_diagnostics": {"execution_context_device_memory_bytes": 2048},
+                    "tensorrt_version": "11.2.1",
+                    "started_unix_seconds": 1.0,
+                    "ended_unix_seconds": 2.0,
+                    "duration_seconds": 1.0,
                 }
             ),
             encoding="utf-8",
@@ -226,7 +389,48 @@ def _environment(identifier: str, image_character: str) -> EnvironmentLock:
     )
 
 
-def test_complete_qualification_passes_with_simulated_worker(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("candidate_mutation", "expected_failure", "failed_environment", "worker_failure"),
+    [
+        (None, None, None, None),
+        ("nonfinite", "NONFINITE_OUTPUT", "candidate", None),
+        ("nonfinite-late", "NONFINITE_OUTPUT", "candidate", None),
+        ("schema", "OUTPUT_SCHEMA_CHANGED", "candidate", None),
+        ("baseline-worker-nonfinite", "CORPUS_INVALID", "baseline", "NONFINITE_OUTPUT"),
+        (
+            "candidate-worker-nonfinite",
+            "NONFINITE_OUTPUT",
+            "candidate",
+            "NONFINITE_OUTPUT",
+        ),
+        ("baseline-worker-execution", "CORPUS_INVALID", "baseline", "EXECUTION_FAILED"),
+        (
+            "candidate-worker-execution",
+            "EXECUTION_FAILED",
+            "candidate",
+            "EXECUTION_FAILED",
+        ),
+        (
+            "baseline-worker-input-integrity",
+            "CORPUS_INVALID",
+            "baseline",
+            "EXECUTION_FAILED",
+        ),
+        (
+            "baseline-worker-build",
+            "ENGINE_BUILD_FAILED",
+            "baseline",
+            "ENGINE_BUILD_FAILED",
+        ),
+    ],
+)
+def test_complete_qualification_preserves_typed_correctness_precedence(
+    tmp_path: Path,
+    candidate_mutation: str | None,
+    expected_failure: str | None,
+    failed_environment: str | None,
+    worker_failure: str | None,
+) -> None:
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(
         """api_version: upgradeguard.dev/v1alpha1
@@ -243,7 +447,14 @@ transformer_shapes:
     )
     corpus_identity = "a" * 64
     corpus = tmp_path / ".upgrade-guard" / "corpora" / "by-id" / "core" / corpus_identity
-    materialize_corpus(recipe, corpus)
+    reference = reference_environment_lock()
+    reference_path = tmp_path / "reference-environment.lock.json"
+    reference_path.write_text(reference.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    materialize_corpus(
+        recipe,
+        corpus,
+        reference_environment_sha256=reference.lock_sha256,
+    )
     (corpus / "materializer.json").write_text(
         json.dumps({"materializer_sha256": f"sha256:{corpus_identity}"}) + "\n",
         encoding="utf-8",
@@ -268,6 +479,7 @@ kind: Qualification
 baseline_environment_id: baseline
 candidate_environment_id: candidate
 environment_lock: {matrix_path}
+reference_environment_lock: {reference_path}
 corpus_lock_id: fixture
 corpus_root: .upgrade-guard/corpora/by-id/core/{corpus_identity}
 required_cases: [tiny-transformer]
@@ -327,11 +539,48 @@ retention: {{}}
     )
 
     destination = tmp_path / "run"
-    outcome = QualificationRunner(runner=SimulatedWorkerRunner(), source_root=tmp_path).run(
-        specification, destination
-    )
+    outcome = QualificationRunner(
+        runner=SimulatedWorkerRunner(candidate_mutation),
+        source_root=tmp_path,
+        lock_verifier=NoopLockVerifier(),
+    ).run(specification, destination)
+    if expected_failure is not None:
+        assert outcome.status == "failed"
+        assert [item.value for item in outcome.failure_codes] == [expected_failure]
+        summary = compare_stored_run(destination)
+        assert summary["failure_codes"] == [expected_failure]
+        if worker_failure is not None:
+            evidence = summary["cases"][0]
+            assert evidence["environment_id"] == failed_environment
+            assert evidence["worker"]["failure_code"] == worker_failure
+            if candidate_mutation == "baseline-worker-build":
+                typed_failure = evidence["build_manifest"]
+                stored_path = destination / "baseline/fp32/build-0.manifest.json"
+            else:
+                typed_failure = evidence["run_result"]
+                assert failed_environment is not None
+                stored_path = destination / failed_environment / "fp32/b1_s8/run-result.json"
+            assert typed_failure["status"] == "failed"
+            assert typed_failure["failure"]["code"] == expected_failure
+            stored_failure = json.loads(stored_path.read_text(encoding="utf-8"))
+            assert stored_failure["failure"]["code"] == expected_failure
+            return
+        typed_candidate = summary["cases"][0]["typed_run_results"]["candidate"]
+        assert typed_candidate["status"] == "failed"
+        assert typed_candidate["failure"]["code"] == expected_failure
+        stored_candidate = json.loads(
+            (destination / "candidate/fp32/b1_s8/run-result.json").read_text(encoding="utf-8")
+        )
+        assert stored_candidate["failure"]["code"] == expected_failure
+        return
     assert outcome.status == "passed"
     assert outcome.failure_codes == ()
     summary = compare_stored_run(destination)
     assert summary["status"] == "passed"
     assert summary["cases"][0]["candidate_determinism"]["bitwise_stable"] is True
+    typed_candidate = summary["cases"][0]["typed_run_results"]["candidate"]
+    assert typed_candidate["status"] == "passed"
+    assert len(typed_candidate["numerical"]) == 2
+    assert typed_candidate["determinism"]["input_hashes_stable"] is True
+    assert (destination / "candidate/fp32/b1_s8/run-result.json").is_file()
+    assert (destination / "candidate/fp32/build-0.manifest.json").is_file()

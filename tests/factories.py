@@ -24,6 +24,7 @@ from upgrade_guard.contracts.environment import (
     TrtexecObservation,
     WorkerProbe,
 )
+from upgrade_guard.contracts.reference_environment import ReferenceEnvironmentLock
 from upgrade_guard.contracts.results import HardwareObservation, RunResult
 from upgrade_guard.errors import FailureCode
 
@@ -53,6 +54,40 @@ def resolved_image(
         config_media_type="application/vnd.oci.image.config.v1+json",
         platform=PlatformIdentity(os="linux", architecture="amd64"),
     )
+
+
+def reference_environment_lock() -> ReferenceEnvironmentLock:
+    """Return one self-valid independent CPU reference lock."""
+
+    lock = ReferenceEnvironmentLock(
+        api_version="upgradeguard.dev/v1alpha1",
+        kind="ReferenceEnvironmentLock",
+        id="onnxruntime-cpu-reference",
+        image=resolved_image(
+            reference="registry.example/reference:v1",
+            manifest_character="7",
+            config_character="8",
+        ),
+        operating_system="Debian GNU/Linux 12",
+        architecture="x86_64",
+        python="3.12.13",
+        onnx="1.22.0",
+        onnxruntime="1.28.0",
+        execution_provider="CPUExecutionProvider",
+        provider_options={
+            "execution_mode": "ORT_SEQUENTIAL",
+            "graph_optimization_level": "ORT_DISABLE_ALL",
+        },
+        numpy="2.4.2",
+        pytorch=None,
+        intra_op_threads=1,
+        inter_op_threads=1,
+        probe_command_sha256=digest("9"),
+        probe_output_sha256=digest("a"),
+        probed_at=FIXED_TIME,
+        lock_sha256=digest("0"),
+    )
+    return lock.model_copy(update={"lock_sha256": lock.computed_sha256()})
 
 
 def available_tool(
@@ -251,6 +286,14 @@ def run_result(
     status: ResultStatus = ResultStatus.PASSED,
     failure: FailureRecord | None = None,
 ) -> RunResult:
+    if status is not ResultStatus.PASSED and failure is None:
+        code = {
+            ResultStatus.UNSUPPORTED: FailureCode.PREFLIGHT_UNSUPPORTED,
+            ResultStatus.INCONCLUSIVE: FailureCode.INCONCLUSIVE,
+            ResultStatus.INFRASTRUCTURE_INVALID: FailureCode.INFRASTRUCTURE_INVALID,
+            ResultStatus.FAILED: FailureCode.NUMERICAL_REGRESSION,
+        }[status]
+        failure = failure_record(code)
     return RunResult(
         api_version="upgradeguard.dev/v1alpha1",
         kind="RunResult",

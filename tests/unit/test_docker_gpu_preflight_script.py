@@ -28,9 +28,16 @@ TARGET_ERROR = (
 
 
 class FakeRunner:
-    def __init__(self, *, toolkit_present: bool, create_error: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        toolkit_present: bool,
+        create_error: str | None,
+        start_error: str | None,
+    ) -> None:
         self.toolkit_present = toolkit_present
         self.create_error = create_error
+        self.start_error = start_error
         self.commands: list[tuple[str, ...]] = []
 
     def run(
@@ -61,6 +68,9 @@ class FakeRunner:
         elif command[:3] == ("docker", "container", "create") and self.create_error:
             returncode = 1
             stderr = self.create_error
+        elif command[:3] == ("docker", "container", "start") and self.start_error:
+            returncode = 1
+            stderr = self.start_error
         elif command[:3] == ("docker", "container", "inspect"):
             stdout = json.dumps(
                 [
@@ -84,8 +94,13 @@ def _run(
     *,
     toolkit_present: bool,
     create_error: str | None,
+    start_error: str | None = None,
 ) -> tuple[int, dict[str, object], FakeRunner]:
-    runner = FakeRunner(toolkit_present=toolkit_present, create_error=create_error)
+    runner = FakeRunner(
+        toolkit_present=toolkit_present,
+        create_error=create_error,
+        start_error=start_error,
+    )
     output = tmp_path / "gpu-runtime-preflight.json"
     monkeypatch.setattr(gpu_preflight, "CommandRunner", lambda: runner)
     monkeypatch.setattr(gpu_preflight, "run_doctor", lambda ignored: supported_doctor())
@@ -139,6 +154,24 @@ def test_exact_target_failure_with_toolkit_is_infrastructure_invalid(
     assert payload["details"]["diagnosis_code"] == "NVIDIA_CONTAINER_RUNTIME_MISCONFIGURED"  # type: ignore[index]
 
 
+def test_exact_target_failure_during_container_start_is_caught_early(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    status, payload, runner = _run(
+        monkeypatch,
+        tmp_path,
+        toolkit_present=False,
+        create_error=None,
+        start_error=TARGET_ERROR,
+    )
+    assert status == 3
+    assert payload["status"] == "unsupported"
+    assert payload["details"]["diagnosis_code"] == "NVIDIA_CONTAINER_TOOLKIT_UNAVAILABLE"  # type: ignore[index]
+    assert any(
+        command[:4] == ("docker", "container", "start", "--attach") for command in runner.commands
+    )
+
+
 def test_success_requires_exact_retained_uuid_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -152,3 +185,4 @@ def test_success_requires_exact_retained_uuid_request(
     assert payload["status"] == "passed"
     assert payload["gpu_request_verified"] is True
     assert payload["gpu_injection_interface"] == "docker-gpus"
+    assert "start_command_sha256" in payload

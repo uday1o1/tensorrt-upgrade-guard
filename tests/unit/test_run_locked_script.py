@@ -32,7 +32,8 @@ def _launcher(lock: Path, command: list[str]) -> list[str]:
 
 
 def _wait_for(path: Path) -> None:
-    for _ in range(200):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
         if path.exists():
             return
         time.sleep(0.01)

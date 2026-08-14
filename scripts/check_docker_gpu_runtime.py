@@ -151,6 +151,25 @@ def main() -> int:
                 "Docker did not retain the exact selected GPU device request",
                 details={"command_sha256": command_sha256(create_command)},
             )
+        start_command = (
+            "docker",
+            "container",
+            "start",
+            "--attach",
+            container_name,
+        )
+        started = runner.run(start_command, timeout_seconds=60)
+        if started.returncode != 0:
+            raise docker_gpu_failure_error(
+                "Docker could not start a container with the selected GPU",
+                stdout=started.stdout,
+                stderr=started.stderr,
+                toolkit_observation=toolkit,
+                details={
+                    "create_command_sha256": command_sha256(create_command),
+                    "start_command_sha256": command_sha256(start_command),
+                },
+            )
         payload = {
             **base,
             "status": "passed",
@@ -162,6 +181,7 @@ def main() -> int:
             "gpu_injection_interface": "docker-gpus",
             "gpu_request_verified": True,
             "command_sha256": command_sha256(create_command),
+            "start_command_sha256": command_sha256(start_command),
         }
         exit_code = int(ExitCode.SUCCESS)
     except UpgradeGuardError as error:

@@ -10,12 +10,18 @@ from upgrade_guard.contracts.bundle import BundleManifest
 from upgrade_guard.contracts.case import CaseManifest
 from upgrade_guard.contracts.doctor import DoctorResult
 from upgrade_guard.contracts.environment import EnvironmentLock, MatrixLock
+from upgrade_guard.contracts.extended import ExtendedCorpusManifest, ExtendedInvocationManifest
 from upgrade_guard.contracts.matrix import MatrixSpec
 from upgrade_guard.contracts.qualification import QualificationSpec
 from upgrade_guard.contracts.reference_environment import ReferenceEnvironmentLock
 from upgrade_guard.contracts.results import RunResult
 from upgrade_guard.corpus.registry import CorpusLock, CorpusRecipe
+from upgrade_guard.reduce.candidate import G2ReductionCandidate, G7ReductionCandidate
+from upgrade_guard.reduce.domain import DomainNumericalCandidate
 from upgrade_guard.reduce.predicate import ReductionRequest
+from upgrade_guard.reduce.public_failure import DomainReductionRequest, PublicFailureDisposition
+from upgrade_guard.reduce.public_replay import PublicNumericalReplayPredicate
+from upgrade_guard.reduce.workflow import ReductionPredicateContract, ReductionSessionManifest
 from upgrade_guard.report.model import ReportModel
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,12 +32,22 @@ SCHEMAS = {
     "corpus-lock.schema.json": CorpusLock,
     "corpus-recipe.schema.json": CorpusRecipe,
     "doctor.schema.json": DoctorResult,
+    "domain-numerical-candidate.schema.json": DomainNumericalCandidate,
+    "domain-reduction-request.schema.json": DomainReductionRequest,
     "environment-lock.schema.json": EnvironmentLock,
+    "extended-corpus-manifest.schema.json": ExtendedCorpusManifest,
+    "extended-invocation-manifest.schema.json": ExtendedInvocationManifest,
+    "g2-reduction-candidate.schema.json": G2ReductionCandidate,
+    "g7-reduction-candidate.schema.json": G7ReductionCandidate,
     "matrix-lock.schema.json": MatrixLock,
     "matrix.schema.json": MatrixSpec,
     "qualification.schema.json": QualificationSpec,
     "reference-environment-lock.schema.json": ReferenceEnvironmentLock,
     "reduction-request.schema.json": ReductionRequest,
+    "reduction-predicate.schema.json": ReductionPredicateContract,
+    "reduction-session.schema.json": ReductionSessionManifest,
+    "public-failure-disposition.schema.json": PublicFailureDisposition,
+    "public-numerical-replay-predicate.schema.json": PublicNumericalReplayPredicate,
     "report.schema.json": ReportModel,
     "result.schema.json": RunResult,
 }

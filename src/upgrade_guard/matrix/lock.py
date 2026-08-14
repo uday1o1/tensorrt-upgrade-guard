@@ -26,7 +26,7 @@ from upgrade_guard.contracts.environment import (
     MatrixLock,
     NvidiaContainerToolkitVersionObservation,
 )
-from upgrade_guard.contracts.matrix import MatrixSpec
+from upgrade_guard.contracts.matrix import EnvironmentRequest, MatrixSpec
 from upgrade_guard.doctor import run_doctor
 from upgrade_guard.errors import InfrastructureError, InvalidInputError, UnsupportedEnvironmentError
 from upgrade_guard.matrix.compatibility import evaluate_compatibility
@@ -220,6 +220,50 @@ class MatrixLocker:
             lock_sha256=zero_checksum,
         )
         return lock.model_copy(update={"lock_sha256": lock.computed_sha256()})
+
+    def verify(self, expected: MatrixLock) -> MatrixLock:
+        """Re-probe every lock-critical fact and reject current environment drift."""
+
+        if expected.computed_sha256() != expected.lock_sha256:
+            raise InvalidInputError("environment lock self-hash differs")
+        specification = MatrixSpec(
+            api_version="upgradeguard.dev/v1alpha1",
+            kind="EnvironmentMatrix",
+            gpu_uuid=expected.gpu_uuid,
+            environments=tuple(
+                EnvironmentRequest(
+                    id=environment.id,
+                    base_image=environment.base_image.authored_reference,
+                    worker_image=environment.worker_image.authored_reference,
+                    platform="linux/amd64",
+                )
+                for environment in expected.environments
+            ),
+        )
+        observed = self.build(
+            specification,
+            source_sha256=expected.source_matrix_sha256,
+        )
+        drift: list[str] = []
+        for old, new in zip(expected.environments, observed.environments, strict=True):
+            for field in (
+                "base_image",
+                "worker_image",
+                "declared_base_manifest_digest",
+                "probe",
+                "host",
+                "compatibility",
+            ):
+                if getattr(old, field) != getattr(new, field):
+                    drift.append(f"{old.id}.{field}")
+        if expected.gpu_uuid != observed.gpu_uuid:
+            drift.append("gpu_uuid")
+        if drift:
+            raise InfrastructureError(
+                "current environment differs from the immutable lock",
+                details={"drifted_fields": sorted(drift)},
+            )
+        return observed
 
 
 def _read_matrix(path: Path) -> bytes:

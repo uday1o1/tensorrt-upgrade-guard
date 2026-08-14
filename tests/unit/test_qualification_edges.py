@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -59,6 +60,7 @@ def _specification() -> QualificationSpec:
             "baseline_environment_id": "baseline",
             "candidate_environment_id": "candidate",
             "environment_lock": "matrix.json",
+            "reference_environment_lock": "reference.json",
             "corpus_lock_id": "fixture",
             "required_cases": ["tiny-transformer"],
             "precision_modes": ["fp32"],
@@ -186,6 +188,103 @@ def test_stored_summary_and_machine_json_fail_closed(tmp_path: Path) -> None:
     summary.write_text("{", encoding="utf-8")
     with pytest.raises(InfrastructureError, match="valid machine JSON"):
         _read_json(summary)
+
+
+def test_compare_selects_public_or_explicit_core_layout_unambiguously(tmp_path: Path) -> None:
+    summary = {
+        "schema_version": "upgradeguard.dev/qualification-summary/v1",
+        "status": "passed",
+        "failure_codes": [],
+    }
+    public = tmp_path / "public"
+    core = public / "core-run"
+    core.mkdir(parents=True)
+    (core / "qualification-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    (public / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "upgradeguard.dev/published-result-table/v1",
+                "status": "passed",
+                "failure_codes": [],
+                "core_qualification": summary,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InvalidInputError, match="publication is invalid"):
+        compare_stored_run(public)
+    assert compare_stored_run(core) == summary
+
+    (public / "qualification-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(InvalidInputError, match="ambiguous"):
+        compare_stored_run(public)
+
+
+def test_compare_rejects_incomplete_or_mismatched_public_result(tmp_path: Path) -> None:
+    summary = {
+        "schema_version": "upgradeguard.dev/qualification-summary/v1",
+        "status": "passed",
+        "failure_codes": [],
+    }
+    public = tmp_path / "public"
+    core = public / "core-run"
+    core.mkdir(parents=True)
+    (core / "qualification-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(InvalidInputError, match="incomplete"):
+        compare_stored_run(public)
+
+    (public / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "upgradeguard.dev/published-result-table/v1",
+                "status": "passed",
+                "core_qualification": {**summary, "failure_codes": ["CORPUS_INVALID"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(InvalidInputError, match="publication is invalid"):
+        compare_stored_run(public)
+
+
+@pytest.mark.parametrize(
+    ("core_status", "core_codes", "published_codes"),
+    [
+        ("failed", ["NUMERICAL_REGRESSION"], ["NUMERICAL_REGRESSION"]),
+        ("passed", [], ["OUTPUT_SCHEMA_CHANGED"]),
+    ],
+)
+def test_compare_rejects_minimal_failed_public_result(
+    tmp_path: Path,
+    core_status: str,
+    core_codes: list[str],
+    published_codes: list[str],
+) -> None:
+    summary = {
+        "schema_version": "upgradeguard.dev/qualification-summary/v1",
+        "status": core_status,
+        "failure_codes": core_codes,
+    }
+    published = {
+        "schema_version": "upgradeguard.dev/published-result-table/v1",
+        "status": "failed",
+        "failure_codes": published_codes,
+        "core_qualification": summary,
+    }
+    public = tmp_path / "public"
+    core = public / "core-run"
+    core.mkdir(parents=True)
+    (core / "qualification-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    (public / "results.json").write_text(json.dumps(published), encoding="utf-8")
+
+    with pytest.raises(InvalidInputError, match="publication is invalid"):
+        compare_stored_run(public)
+
+    published["status"] = "passed"
+    (public / "results.json").write_text(json.dumps(published), encoding="utf-8")
+    with pytest.raises(InvalidInputError, match="publication is invalid"):
+        compare_stored_run(public)
 
 
 def test_output_evidence_rejects_schema_escape_and_hash_mutation(tmp_path: Path) -> None:

@@ -45,3 +45,14 @@ def test_determinism_rejects_empty_and_shape_changing_repetitions() -> None:
             ("one",),
             policy,
         )
+
+
+def test_per_repetition_input_integrity_overrides_legacy_flat_hashes() -> None:
+    output = np.ones((2,), dtype=np.float32)
+    result = summarize_determinism(
+        (output, output.copy()),
+        ("sha256:" + "1" * 64, "sha256:" + "2" * 64),
+        NumericalTolerance(atol=0.0, rtol=0.0),
+        input_hashes_stable=True,
+    )
+    assert result.input_hashes_stable is True

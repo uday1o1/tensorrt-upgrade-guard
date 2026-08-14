@@ -130,6 +130,11 @@ def verify_bundle(
                 "undeclared": sorted(actual_payload_names - set(declared)),
             },
         )
+    for evidence in manifest.expected_failure.evidence:
+        if declared.get(evidence.path) != evidence:
+            raise InvalidInputError(
+                "bundle expected-failure evidence is missing or has a different identity"
+            )
     for path, artifact in declared.items():
         entry = by_name[path]
         if entry.size != artifact.bytes:
@@ -254,7 +259,7 @@ def _validate_member_path(value: str) -> None:
 
 
 def _validate_suffix(value: str) -> None:
-    if value in {"bundle.json", "SHA256SUMS"}:
+    if value in {"bundle.json", "SHA256SUMS", "containers/Dockerfile.worker"}:
         return
     if Path(value).suffix.lower() not in ALLOWED_SUFFIXES:
         raise InvalidInputError(f"unsupported bundle file type: {value}")

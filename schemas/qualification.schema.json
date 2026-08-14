@@ -497,6 +497,18 @@
       "title": "Environment Lock",
       "type": "string"
     },
+    "environment_matrix": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Environment Matrix"
+    },
     "hardware_validity": {
       "$ref": "#/$defs/HardwareValidityPolicy"
     },
@@ -548,6 +560,10 @@
     "reduction_budget": {
       "$ref": "#/$defs/ReductionBudget"
     },
+    "reference_environment_lock": {
+      "title": "Reference Environment Lock",
+      "type": "string"
+    },
     "required_cases": {
       "items": {
         "type": "string"
@@ -570,6 +586,7 @@
     "baseline_environment_id",
     "candidate_environment_id",
     "environment_lock",
+    "reference_environment_lock",
     "corpus_lock_id",
     "required_cases",
     "precision_modes",

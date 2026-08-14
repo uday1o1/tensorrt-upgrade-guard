@@ -31,6 +31,31 @@ def render_html(report: ReportModel) -> str:
         else "<h2>Failures</h2><p>None.</p>"
     )
     warnings = "".join(f"<li>{html.escape(warning)}</li>" for warning in report.warnings)
+    publication = ""
+    if report.publication_complete:
+        gates = "".join(
+            f"<tr><td>{html.escape(name)}</td><td>{html.escape(status.value)}</td></tr>"
+            for name, status in report.acceptance_gates.items()
+        )
+        methodology = "".join(f"<li>{html.escape(item)}</li>" for item in report.methodology)
+        limitations = "".join(f"<li>{html.escape(item)}</li>" for item in report.limitations)
+        commands = "".join(
+            f"<li><code>{html.escape(' '.join(command))}</code></li>"
+            for command in report.reproduction_commands
+        )
+        publication = (
+            "<h2>Provenance</h2>"
+            f"<p>Source commit: <code>{html.escape(report.source_git_commit or '')}</code><br>"
+            f"GPU UUID: <code>{html.escape(report.gpu_uuid or '')}</code><br>"
+            f"Environment lock: <code>{html.escape(report.matrix_lock_sha256 or '')}</code><br>"
+            "Reference lock: "
+            f"<code>{html.escape(report.reference_environment_lock_sha256 or '')}</code></p>"
+            "<h2>Acceptance gates</h2><table><thead><tr><th>Gate</th><th>Status</th>"
+            f"</tr></thead><tbody>{gates}</tbody></table>"
+            f"<h2>Methodology</h2><ul>{methodology}</ul>"
+            f"<h2>Limitations</h2><ul>{limitations}</ul>"
+            f"<h2>Reproduction</h2><ul>{commands}</ul>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -57,6 +82,7 @@ code {{ overflow-wrap: anywhere; }}
 {failure_section}
 <h2>Warnings</h2>
 <ul>{warnings}</ul>
+{publication}
 </body>
 </html>
 """

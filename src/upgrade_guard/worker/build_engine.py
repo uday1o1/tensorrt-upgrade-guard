@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from upgrade_guard.contracts.build import WorkerBuildResult
 from upgrade_guard.worker.common import (
     command_evidence,
     load_json,
@@ -25,7 +26,10 @@ def build_engine(arguments: argparse.Namespace) -> dict[str, Any]:
 
     started = time.time()
     for plugin in arguments.plugin:
-        ctypes.CDLL(str(plugin), mode=ctypes.RTLD_GLOBAL)
+        try:
+            ctypes.CDLL(str(plugin), mode=ctypes.RTLD_GLOBAL)
+        except OSError as error:
+            raise RuntimeError(f"plugin load failed: {plugin}: {error}") from error
     logger = _capturing_logger(trt, verbose=arguments.verbose)
     builder = trt.Builder(logger)
     network = builder.create_network(_strongly_typed_network_flags(trt))
@@ -88,7 +92,11 @@ def build_engine(arguments: argparse.Namespace) -> dict[str, Any]:
     return {
         "schema_version": "upgradeguard.dev/worker-build/v1",
         "status": "passed",
-        "model": {"path": str(arguments.model), "sha256": sha256_file(arguments.model)},
+        "model": {
+            "path": str(arguments.model),
+            "sha256": sha256_file(arguments.model),
+            "bytes": arguments.model.stat().st_size,
+        },
         "engine": {
             "path": str(arguments.engine),
             "sha256": sha256_file(arguments.engine),
@@ -103,11 +111,13 @@ def build_engine(arguments: argparse.Namespace) -> dict[str, Any]:
         "inspector": {
             "path": str(arguments.inspector),
             "sha256": sha256_file(arguments.inspector),
+            "bytes": arguments.inspector.stat().st_size,
         },
         "timing_cache": {
             "path": str(arguments.timing_cache),
             "input_sha256": timing_cache_input_sha256,
             "output_sha256": sha256_file(arguments.timing_cache),
+            "bytes": arguments.timing_cache.stat().st_size,
         },
         "parser_errors": parser_errors,
         "builder_messages": logger.messages,
@@ -115,6 +125,11 @@ def build_engine(arguments: argparse.Namespace) -> dict[str, Any]:
             message for message in logger.messages if message["severity"] == "WARNING"
         ],
         "timing_cache_state": observed_cache_state,
+        "builder_configuration": {
+            "strongly_typed": "true",
+            "workspace_bytes": str(arguments.workspace_bytes),
+            "optimization_level": str(arguments.optimization_level),
+        },
         "tensorrt_version": trt.__version__,
         "started_unix_seconds": started,
         "ended_unix_seconds": ended,
@@ -184,23 +199,35 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     arguments = _parser().parse_args()
+    invocation_started = time.time()
     try:
         result = build_engine(arguments)
     except Exception as error:
+        from upgrade_guard.classify import classify_worker_error
+
+        invocation_ended = time.time()
         failure: dict[str, object] = {
             "schema_version": "upgradeguard.dev/worker-build/v1",
             "status": "failed",
             "error_type": type(error).__name__,
             "message": str(error),
+            "failure_code": classify_worker_error("build", str(error)).value,
+            "started_unix_seconds": invocation_started,
+            "ended_unix_seconds": invocation_ended,
+            "duration_seconds": invocation_ended - invocation_started,
+            "builder_configuration": {
+                "strongly_typed": "true",
+                "workspace_bytes": str(arguments.workspace_bytes),
+                "optimization_level": str(arguments.optimization_level),
+            },
         }
         failure.update(command_evidence("upgrade_guard.worker.build_engine", sys.argv[1:]))
-        write_json_atomic(
-            arguments.result,
-            failure,
-        )
+        typed_failure = WorkerBuildResult.model_validate(failure)
+        write_json_atomic(arguments.result, typed_failure.model_dump(mode="json"))
         raise
     result.update(command_evidence("upgrade_guard.worker.build_engine", sys.argv[1:]))
-    write_json_atomic(arguments.result, result)
+    typed_result = WorkerBuildResult.model_validate(result)
+    write_json_atomic(arguments.result, typed_result.model_dump(mode="json"))
 
 
 if __name__ == "__main__":

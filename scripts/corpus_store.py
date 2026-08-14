@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 CorpusKind = Literal["core", "plugin", "mobilenet"]
 MATERIALIZER_NAME = "materializer.json"
+TEST_REFERENCE_SHA256 = "sha256:" + ("0" * 64)
 
 COMMON_SOURCES = (
     "pyproject.toml",
@@ -69,10 +70,25 @@ def _canonical(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def materializer_document(project: Path, kind: CorpusKind) -> dict[str, Any]:
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value) == 71
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def materializer_document(
+    project: Path,
+    kind: CorpusKind,
+    reference_environment_sha256: str = TEST_REFERENCE_SHA256,
+) -> dict[str, Any]:
     """Hash every checked-in producer and dependency identity for one corpus."""
 
     project = project.resolve(strict=True)
+    if not _is_sha256(reference_environment_sha256):
+        raise ValueError("reference environment identity must be a SHA-256 digest")
     source_paths = tuple(sorted((*COMMON_SOURCES, *KIND_SOURCES[kind])))
     sources: dict[str, dict[str, int | str]] = {}
     for relative in source_paths:
@@ -83,6 +99,7 @@ def materializer_document(project: Path, kind: CorpusKind) -> dict[str, Any]:
     identity_payload = {
         "schema_version": "upgradeguard.dev/corpus-materializer/v1",
         "kind": kind,
+        "reference_environment_sha256": reference_environment_sha256,
         "sources": sources,
     }
     identity = f"sha256:{hashlib.sha256(_canonical(identity_payload)).hexdigest()}"
@@ -165,24 +182,43 @@ def corpus_index(
 
     project = project.resolve(strict=True)
     entries: dict[str, dict[str, str]] = {}
+    reference_environment_sha256: str | None = None
     for kind, authored_root in sorted(roots.items()):
         root = authored_root.resolve(strict=True)
         if not root.is_relative_to(project) or root.is_symlink():
             raise ValueError(f"corpus root is outside the project or is a symlink: {root}")
-        expected = materializer_document(project, kind)
-        verify_sidecar(root, expected)
-        inventory = tree_inventory(root)
         lock_path = root / LOCK_NAMES[kind]
         if not lock_path.is_file() or lock_path.is_symlink():
             raise ValueError(f"corpus lock is absent: {lock_path}")
+        try:
+            lock_value = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"corpus lock is invalid: {lock_path}") from error
+        observed_reference = lock_value.get("reference_environment_sha256")
+        if not _is_sha256(observed_reference):
+            raise ValueError(f"corpus lock lacks a reference environment identity: {lock_path}")
+        assert isinstance(observed_reference, str)
+        if reference_environment_sha256 is None:
+            reference_environment_sha256 = observed_reference
+        elif observed_reference != reference_environment_sha256:
+            raise ValueError("corpora were produced by different reference environments")
+        expected = materializer_document(project, kind, observed_reference)
+        verify_sidecar(root, expected)
+        inventory = tree_inventory(root)
         entries[kind] = {
             "root": root.relative_to(project).as_posix(),
             "lock": lock_path.relative_to(project).as_posix(),
             "lock_sha256": _sha256(lock_path),
             "materializer_sha256": str(expected["materializer_sha256"]),
             "inventory_sha256": f"sha256:{hashlib.sha256(_canonical(inventory)).hexdigest()}",
+            "reference_environment_sha256": observed_reference,
         }
-    return {"schema_version": "upgradeguard.dev/corpus-index/v1", "corpora": entries}
+    assert reference_environment_sha256 is not None
+    return {
+        "schema_version": "upgradeguard.dev/corpus-index/v1",
+        "reference_environment_sha256": reference_environment_sha256,
+        "corpora": entries,
+    }
 
 
 def _make_read_only(root: Path) -> None:
@@ -235,19 +271,35 @@ def main() -> int:
     identity = subparsers.add_parser("identity")
     identity.add_argument("--project", type=Path, required=True)
     identity.add_argument("--kind", type=_kind, required=True)
+    identity.add_argument(
+        "--reference-environment-sha256",
+        default=TEST_REFERENCE_SHA256,
+    )
     sidecar = subparsers.add_parser("write-sidecar")
     sidecar.add_argument("--project", type=Path, required=True)
     sidecar.add_argument("--kind", type=_kind, required=True)
     sidecar.add_argument("--root", type=Path, required=True)
+    sidecar.add_argument(
+        "--reference-environment-sha256",
+        default=TEST_REFERENCE_SHA256,
+    )
     verify = subparsers.add_parser("verify")
     verify.add_argument("--project", type=Path, required=True)
     verify.add_argument("--kind", type=_kind, required=True)
     verify.add_argument("--root", type=Path, required=True)
+    verify.add_argument(
+        "--reference-environment-sha256",
+        default=TEST_REFERENCE_SHA256,
+    )
     publish_parser = subparsers.add_parser("publish")
     publish_parser.add_argument("--project", type=Path, required=True)
     publish_parser.add_argument("--kind", type=_kind, required=True)
     publish_parser.add_argument("--staging", type=Path, required=True)
     publish_parser.add_argument("--destination", type=Path, required=True)
+    publish_parser.add_argument(
+        "--reference-environment-sha256",
+        default=TEST_REFERENCE_SHA256,
+    )
     index_parser = subparsers.add_parser("write-index")
     index_parser.add_argument("--project", type=Path, required=True)
     index_parser.add_argument("--output", type=Path, required=True)
@@ -272,7 +324,11 @@ def main() -> int:
             raise ValueError("corpus index requires at least one corpus")
         _write_atomic(arguments.output, corpus_index(arguments.project, roots))
         return 0
-    document = materializer_document(arguments.project, arguments.kind)
+    document = materializer_document(
+        arguments.project,
+        arguments.kind,
+        arguments.reference_environment_sha256,
+    )
     if arguments.command == "identity":
         print(json.dumps(document, allow_nan=False, sort_keys=True))
     elif arguments.command == "write-sidecar":

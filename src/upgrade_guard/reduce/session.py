@@ -39,7 +39,7 @@ def reduce_failure_directory(source: Path, destination: Path) -> dict[str, Any]:
         if isinstance(request.predicate, NumericalPredicate):
             summary = _reduce_numerical(source, staging, request)
         elif isinstance(request.predicate, PerformancePredicate):
-            summary = _reduce_performance(source, request)
+            summary = _reduce_performance(source, staging, request)
         else:
             reduced = reduce_profile_failure(request.predicate)
             summary = {
@@ -100,7 +100,11 @@ def _reduce_numerical(source: Path, staging: Path, request: ReductionRequest) ->
     }
 
 
-def _reduce_performance(source: Path, request: ReductionRequest) -> dict[str, Any]:
+def _reduce_performance(
+    source: Path,
+    staging: Path,
+    request: ReductionRequest,
+) -> dict[str, Any]:
     predicate = request.predicate
     if not isinstance(predicate, PerformancePredicate):
         raise AssertionError("performance reducer received a different predicate")
@@ -121,6 +125,20 @@ def _reduce_performance(source: Path, request: ReductionRequest) -> dict[str, An
         maximum_candidates=request.maximum_trials,
         maximum_seconds=float(request.maximum_seconds),
     )
+    pairs_path = staging / "reduced-pairs.json"
+    retained_pairs = [
+        {
+            "pair_index": index,
+            "baseline_ms": pair.baseline_milliseconds,
+            "candidate_ms": pair.candidate_milliseconds,
+            "ratio": pair.candidate_milliseconds / pair.baseline_milliseconds,
+        }
+        for index, pair in enumerate(reduced.pairs)
+    ]
+    pairs_path.write_text(
+        json.dumps(retained_pairs, allow_nan=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return {
         "kind": "performance",
         "failure_code": request.failure_code.value,
@@ -128,6 +146,9 @@ def _reduce_performance(source: Path, request: ReductionRequest) -> dict[str, An
         "confirmation_count": request.confirmation_count,
         "original_pairs": reduced.original_pairs,
         "reduced_pairs": len(reduced.pairs),
+        "reduced_pairs_path": pairs_path.name,
+        "reduced_pairs_sha256": sha256_file(pairs_path),
+        "reduced_pairs_bytes": pairs_path.stat().st_size,
         "evaluated_candidates": reduced.evaluated_candidates,
         "budget_exhausted": reduced.budget_exhausted,
         "point": reduced.estimate.point,

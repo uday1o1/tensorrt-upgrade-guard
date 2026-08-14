@@ -1,4 +1,4 @@
-#include "kernels/residual_rmsnorm_launch.hpp"
+#include "plugin/residual_rmsnorm_plugin.hpp"
 
 #include <cuda_runtime.h>
 
@@ -9,34 +9,12 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
 namespace
 {
-
-__global__ void omittedResidual(float const* x, float const* gamma, float* output,
-    std::int32_t hidden)
-{
-    std::int32_t const column = static_cast<std::int32_t>(threadIdx.x);
-    __shared__ float squares[512];
-    float const value = column < hidden ? x[column] : 0.0F;
-    squares[column] = value * value;
-    __syncthreads();
-    for (std::int32_t stride = 256; stride > 0; stride /= 2)
-    {
-        if (column < stride && column + stride < hidden)
-        {
-            squares[column] += squares[column + stride];
-        }
-        __syncthreads();
-    }
-    if (column < hidden)
-    {
-        output[column] = value * gamma[column]
-            * rsqrtf(squares[0] / static_cast<float>(hidden) + 1e-5F);
-    }
-}
 
 __global__ void zeroEpsilon(float const* input, float* output)
 {
@@ -61,38 +39,65 @@ struct NumericalSeed
     float reference;
 };
 
-NumericalSeed numericalSeed()
+NumericalSeed numericalSeed(std::int32_t rows, std::int32_t hidden, float xValue,
+    float residualValue, float gammaValue)
 {
-    constexpr std::int32_t hidden{259};
-    std::vector<float> x(hidden, 0.5F);
-    std::vector<float> residual(hidden, 0.25F);
-    std::vector<float> gamma(hidden, 1.0F);
-    std::vector<float> output(hidden);
+    std::size_t const elements
+        = static_cast<std::size_t>(rows) * static_cast<std::size_t>(hidden);
+    std::vector<float> x(elements, xValue);
+    std::vector<float> residual(elements, residualValue);
+    std::vector<float> gamma(static_cast<std::size_t>(hidden), gammaValue);
+    std::vector<float> output(elements);
     float* deviceX{nullptr};
     float* deviceResidual{nullptr};
     float* deviceGamma{nullptr};
     float* deviceOutput{nullptr};
-    std::size_t const bytes = static_cast<std::size_t>(hidden) * sizeof(float);
+    std::size_t const bytes = elements * sizeof(float);
+    std::size_t const gammaBytes = static_cast<std::size_t>(hidden) * sizeof(float);
     bool ok = cudaMalloc(&deviceX, bytes) == cudaSuccess
         && cudaMalloc(&deviceResidual, bytes) == cudaSuccess
-        && cudaMalloc(&deviceGamma, bytes) == cudaSuccess
+        && cudaMalloc(&deviceGamma, gammaBytes) == cudaSuccess
         && cudaMalloc(&deviceOutput, bytes) == cudaSuccess
         && cudaMemcpy(deviceX, x.data(), bytes, cudaMemcpyHostToDevice) == cudaSuccess
         && cudaMemcpy(deviceResidual, residual.data(), bytes, cudaMemcpyHostToDevice) == cudaSuccess
-        && cudaMemcpy(deviceGamma, gamma.data(), bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+        && cudaMemcpy(deviceGamma, gamma.data(), gammaBytes, cudaMemcpyHostToDevice)
+            == cudaSuccess;
     if (ok)
     {
-        omittedResidual<<<1, 512>>>(deviceX, deviceGamma, deviceOutput, hidden);
-        ok = cudaDeviceSynchronize() == cudaSuccess
+        upgrade_guard::ResidualRmsNormPlugin fault{1e-5F};
+        nvinfer1::PluginTensorDesc inputDesc[3]{};
+        nvinfer1::PluginTensorDesc outputDesc[1]{};
+        inputDesc[0].dims.nbDims = 3;
+        inputDesc[0].dims.d[0] = rows;
+        inputDesc[0].dims.d[1] = 1;
+        inputDesc[0].dims.d[2] = hidden;
+        inputDesc[0].type = nvinfer1::DataType::kFLOAT;
+        inputDesc[0].format = nvinfer1::TensorFormat::kLINEAR;
+        inputDesc[1] = inputDesc[0];
+        inputDesc[2].dims.nbDims = 1;
+        inputDesc[2].dims.d[0] = hidden;
+        inputDesc[2].type = nvinfer1::DataType::kFLOAT;
+        inputDesc[2].format = nvinfer1::TensorFormat::kLINEAR;
+        outputDesc[0] = inputDesc[0];
+        void const* pluginInputs[3]{deviceX, deviceResidual, deviceGamma};
+        void* pluginOutputs[1]{deviceOutput};
+        ok = fault.setTactic(
+                 static_cast<std::int32_t>(upgrade_guard::ResidualRmsNormTactic::kScalarReference))
+                == 0
+            && fault.onShapeChange(inputDesc, 3, outputDesc, 1) == 0
+            && fault.enqueue(inputDesc, outputDesc, pluginInputs, pluginOutputs, nullptr, nullptr) == 0
+            && cudaDeviceSynchronize() == cudaSuccess
             && cudaMemcpy(output.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
     }
-    float const reference = 0.75F / std::sqrt(0.75F * 0.75F + 1e-5F);
+    float const combined = xValue + residualValue;
+    float const reference
+        = combined * gammaValue / std::sqrt(combined * combined + 1e-5F);
     float const observedFault = output[0];
     bool const faultDetected = ok && std::abs(observedFault - reference) > 0.1F;
     if (ok)
     {
         ok = upgrade_guard::launchResidualRmsNormScalar(nvinfer1::DataType::kFLOAT, deviceX,
-                 deviceResidual, deviceGamma, deviceOutput, 1, hidden, 1e-5F, nullptr)
+                 deviceResidual, deviceGamma, deviceOutput, rows, hidden, 1e-5F, nullptr)
                 == cudaSuccess
             && cudaDeviceSynchronize() == cudaSuccess
             && cudaMemcpy(output.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
@@ -192,12 +197,13 @@ struct PerformanceSeed
     bool resultPreserved;
 };
 
+constexpr std::array<bool, 24> PERFORMANCE_ORDER_SCHEDULE{true, false, false, true, true,
+    false, true, false, false, true, false, true, true, false, false, true, true, false, true,
+    false, true, false, true, false};
+
 PerformanceSeed performanceSeed(std::int32_t pairIndex)
 {
     constexpr float targetRatio{1.10F};
-    constexpr std::array<bool, 20> baselineFirstSchedule{true, false, false, true, true,
-        false, true, false, false, true, false, true, true, false, false, true, true, false,
-        true, false};
     float* input{nullptr};
     float* output{nullptr};
     if (cudaMalloc(&input, 32 * sizeof(float)) != cudaSuccess
@@ -239,7 +245,7 @@ PerformanceSeed performanceSeed(std::int32_t pairIndex)
             break;
         }
     }
-    bool const baselineFirst = baselineFirstSchedule[static_cast<std::size_t>(pairIndex)];
+    bool const baselineFirst = PERFORMANCE_ORDER_SCHEDULE[static_cast<std::size_t>(pairIndex)];
     float baseline{NAN};
     float candidate{NAN};
     if (baselineFirst)
@@ -271,20 +277,108 @@ PerformanceSeed performanceSeed(std::int32_t pairIndex)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3 || std::string(argv[1]) != "--pair-index")
+    std::int32_t pairIndex{-1};
+    std::int32_t rows{1};
+    std::int32_t hidden{259};
+    float xValue{0.5F};
+    float residualValue{0.25F};
+    float gammaValue{1.0F};
+    bool onlyG2{false};
+    auto parseInteger = [](char const* text, std::int32_t& value) {
+        char* end{nullptr};
+        long const parsed = std::strtol(text, &end, 10);
+        if (end == text || *end != '\0' || parsed < 0
+            || parsed > static_cast<long>(std::numeric_limits<std::int32_t>::max()))
+        {
+            return false;
+        }
+        value = static_cast<std::int32_t>(parsed);
+        return true;
+    };
+    auto parseFloat = [](char const* text, float& value) {
+        char* end{nullptr};
+        float const parsed = std::strtof(text, &end);
+        if (end == text || *end != '\0' || !std::isfinite(parsed))
+        {
+            return false;
+        }
+        value = parsed;
+        return true;
+    };
+    for (int index = 1; index < argc; ++index)
     {
-        std::cerr << "usage: upgrade_guard_gpu_faults --pair-index INDEX\n";
+        std::string const option{argv[index]};
+        if (option == "--only-g2")
+        {
+            onlyG2 = true;
+            continue;
+        }
+        if (index + 1 >= argc)
+        {
+            std::cerr << "missing value for " << option << "\n";
+            return 2;
+        }
+        bool valid{false};
+        if (option == "--pair-index")
+        {
+            valid = parseInteger(argv[++index], pairIndex);
+        }
+        else if (option == "--rows")
+        {
+            valid = parseInteger(argv[++index], rows);
+        }
+        else if (option == "--hidden")
+        {
+            valid = parseInteger(argv[++index], hidden);
+        }
+        else if (option == "--x-value")
+        {
+            valid = parseFloat(argv[++index], xValue);
+        }
+        else if (option == "--residual-value")
+        {
+            valid = parseFloat(argv[++index], residualValue);
+        }
+        else if (option == "--gamma-value")
+        {
+            valid = parseFloat(argv[++index], gammaValue);
+        }
+        else
+        {
+            std::cerr << "unknown option: " << option << "\n";
+            return 2;
+        }
+        if (!valid)
+        {
+            std::cerr << "invalid value for " << option << "\n";
+            return 2;
+        }
+    }
+    if (pairIndex < 0
+        || static_cast<std::size_t>(pairIndex) >= PERFORMANCE_ORDER_SCHEDULE.size() || rows < 1
+        || rows > 4096 || hidden < 1
+        || hidden > 65536)
+    {
+        std::cerr << "pair index, rows, or hidden size is outside the bounded range\n";
         return 2;
     }
-    char* end{nullptr};
-    long const parsedPairIndex = std::strtol(argv[2], &end, 10);
-    if (end == argv[2] || *end != '\0' || parsedPairIndex < 0 || parsedPairIndex >= 20)
+    NumericalSeed const numerical
+        = numericalSeed(rows, hidden, xValue, residualValue, gammaValue);
+    if (onlyG2)
     {
-        std::cerr << "pair index must be in [0, 19]\n";
-        return 2;
+        std::cout << std::fixed << std::setprecision(6)
+                  << "{\"schema_version\":\"upgradeguard.dev/gpu-faults/v1\","
+                  << "\"G2\":{\"mechanism\":\"plugin_omits_residual_at_hidden_259\","
+                  << "\"detected\":" << (numerical.detected ? "true" : "false")
+                  << ",\"control\":\""
+                  << (numerical.controlPassed ? "passed" : "failed")
+                  << "\",\"observed\":" << numerical.observed
+                  << ",\"reference\":" << numerical.reference << ",\"rows\":" << rows
+                  << ",\"hidden\":" << hidden << ",\"x_value\":" << xValue
+                  << ",\"residual_value\":" << residualValue << ",\"gamma_value\":"
+                  << gammaValue << "}}\n";
+        return numerical.detected && numerical.controlPassed ? 0 : 1;
     }
-    std::int32_t const pairIndex = static_cast<std::int32_t>(parsedPairIndex);
-    NumericalSeed const numerical = numericalSeed();
     NonfiniteSeed const nonfinite = nonfiniteSeed();
     PerformanceSeed const performanceSeedResult = performanceSeed(pairIndex);
     float const ratio = performanceSeedResult.ratio;
@@ -292,15 +386,19 @@ int main(int argc, char** argv)
         && performanceSeedResult.calibrated && std::isfinite(ratio) && ratio > 1.03F;
     std::cout << std::fixed << std::setprecision(6)
               << "{\"schema_version\":\"upgradeguard.dev/gpu-faults/v1\","
-              << "\"G2\":{\"expected\":\"NUMERICAL_REGRESSION\",\"detected\":"
+              << "\"G2\":{\"mechanism\":\"plugin_omits_residual_at_hidden_259\",\"detected\":"
               << (numerical.detected ? "true" : "false") << ",\"control\":\""
               << (numerical.controlPassed ? "passed" : "failed")
               << "\",\"observed\":" << numerical.observed
-              << ",\"reference\":" << numerical.reference << "},"
-              << "\"G3\":{\"expected\":\"NONFINITE_OUTPUT\",\"detected\":"
+              << ",\"reference\":" << numerical.reference
+              << ",\"observed_facts\":{\"numerical_valid\":"
+              << (numerical.detected ? "false" : "true") << "}},"
+              << "\"G3\":{\"mechanism\":\"zero_epsilon_zero_input\",\"detected\":"
               << (nonfinite.detected ? "true" : "false") << ",\"control\":\""
-              << (nonfinite.controlPassed ? "passed" : "failed") << "\"},"
-              << "\"G5\":{\"expected\":\"PERFORMANCE_REGRESSION\",\"detected\":"
+              << (nonfinite.controlPassed ? "passed" : "failed")
+              << "\",\"observed_facts\":{\"finite\":"
+              << (nonfinite.detected ? "false" : "true") << "}},"
+              << "\"G5\":{\"mechanism\":\"controlled_device_delay\",\"detected\":"
               << (performance ? "true" : "false") << ",\"control\":\""
               << (performanceSeedResult.resultPreserved ? "passed" : "failed")
               << "\",\"pair_index\":" << performanceSeedResult.pairIndex

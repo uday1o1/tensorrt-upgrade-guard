@@ -22,6 +22,7 @@ class WorkerMounts:
     source: Path
     corpus: Path
     output: Path
+    state: Path | None = None
 
 
 class DockerGpuWorker:
@@ -50,6 +51,10 @@ class DockerGpuWorker:
         corpus = validated_mount(mounts.corpus, must_exist=True)
         mounts.output.mkdir(parents=True, exist_ok=True)
         output = validated_mount(mounts.output, must_exist=True)
+        state_arguments: tuple[str, ...] = ()
+        if mounts.state is not None:
+            state = validated_mount(mounts.state, must_exist=True)
+            state_arguments = ("--mount", f"type=bind,src={state},dst=/state,readonly")
         if not command or any("\x00" in argument for argument in command):
             raise InvalidInputError("worker command must be a NUL-free argument array")
         accepted = tuple(accepted_returncodes)
@@ -100,6 +105,7 @@ class DockerGpuWorker:
             f"type=bind,src={corpus},dst=/corpus,readonly",
             "--mount",
             f"type=bind,src={output},dst=/output",
+            *state_arguments,
             "--env",
             "PYTHONPATH=/opt/upgrade-guard/src",
             "--env",

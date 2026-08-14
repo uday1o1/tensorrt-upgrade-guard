@@ -10,7 +10,9 @@ import pytest
 
 from upgrade_guard.classify import (
     CaseSignals,
+    classify_observed_facts,
     classify_signals,
+    classify_worker_error,
     exit_code_for_failure,
     status_for_failure,
 )
@@ -69,6 +71,47 @@ def test_precedence_uses_specific_execution_evidence_before_numerics() -> None:
         )
     )
     assert code is FailureCode.OUTPUT_SCHEMA_CHANGED
+
+
+def test_observed_facts_are_strict_and_use_production_precedence() -> None:
+    assert (
+        classify_observed_facts({"finite": False, "numerical_valid": False})
+        is FailureCode.NONFINITE_OUTPUT
+    )
+    with pytest.raises(ValueError, match="unknown"):
+        classify_observed_facts({"numercial_valid": False})
+    with pytest.raises(ValueError, match="boolean"):
+        classify_observed_facts({"finite": "false"})
+
+
+@pytest.mark.parametrize(
+    ("phase", "message", "expected"),
+    [
+        ("build", "ONNX parser rejected model", FailureCode.ONNX_PARSE_FAILED),
+        (
+            "build",
+            "freshly built engine failed same-environment reload",
+            FailureCode.ENGINE_DESERIALIZE_FAILED,
+        ),
+        (
+            "build",
+            "TensorRT engine build returned no serialized engine",
+            FailureCode.ENGINE_BUILD_FAILED,
+        ),
+        ("correctness", "input shape was rejected for x", FailureCode.PROFILE_REJECTED),
+        (
+            "correctness",
+            "plugin load failed: undefined symbol",
+            FailureCode.PLUGIN_COMPILE_FAILED,
+        ),
+        ("correctness", "output y contains nonfinite values", FailureCode.NONFINITE_OUTPUT),
+        ("correctness", "TensorRT execute_async_v3 returned false", FailureCode.EXECUTION_FAILED),
+    ],
+)
+def test_worker_errors_keep_specific_failure_codes(
+    phase: str, message: str, expected: FailureCode
+) -> None:
+    assert classify_worker_error(phase, message) is expected  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

@@ -3,3 +3,5 @@
 !containers/
 !containers/Dockerfile.worker
 !containers/requirements-worker.txt
+!containers/Dockerfile.reference
+!containers/requirements-reference.txt

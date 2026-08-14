@@ -9,8 +9,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES native)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+  message(FATAL_ERROR "CMAKE_CUDA_ARCHITECTURES must come from the environment lock")
 endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -77,17 +77,39 @@ if(UPGRADE_GUARD_BUILD_TESTS)
 endif()
 
 if(UPGRADE_GUARD_BUILD_FAULTS)
+  add_library(
+    upgrade_guard_fault_plugin SHARED
+    cpp/plugin/residual_rmsnorm_plugin.cpp
+    cpp/plugin/residual_rmsnorm_creator.cpp
+    cpp/plugin/register_plugin.cpp
+    cpp/kernels/residual_rmsnorm_naive.cu
+    cpp/kernels/residual_rmsnorm_optimized.cu
+    cpp/faults/omitted_residual_fault.cu
+  )
+  target_compile_definitions(
+    upgrade_guard_fault_plugin PRIVATE UPGRADE_GUARD_FAULT_OMIT_RESIDUAL_HIDDEN=259
+  )
+  target_include_directories(upgrade_guard_fault_plugin PRIVATE cpp)
+  target_link_libraries(
+    upgrade_guard_fault_plugin
+    PRIVATE TensorRT::nvinfer TensorRT::nvinfer_plugin CUDA::cudart
+  )
+  target_compile_options(
+    upgrade_guard_fault_plugin
+    PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wconversion;-Werror>
+      $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr;--Werror=cross-execution-space-call>
+  )
   add_executable(upgrade_guard_tail_oob_fault cpp/faults/tail_oob_fault.cu)
   target_link_libraries(upgrade_guard_tail_oob_fault PRIVATE CUDA::cudart)
   add_executable(
     upgrade_guard_gpu_faults
     cpp/faults/gpu_faults.cu
-    cpp/kernels/residual_rmsnorm_naive.cu
   )
   target_include_directories(upgrade_guard_gpu_faults PRIVATE cpp)
   target_link_libraries(
     upgrade_guard_gpu_faults
-    PRIVATE TensorRT::nvinfer CUDA::cudart
+    PRIVATE upgrade_guard_fault_plugin TensorRT::nvinfer CUDA::cudart
   )
   add_executable(
     upgrade_guard_serialization_fault

@@ -10,7 +10,16 @@ from datetime import datetime
 from pathlib import Path
 
 from upgrade_guard.contracts.base import sha256_file
-from upgrade_guard.contracts.bundle import BundleManifest, SourceBuildRequest
+from upgrade_guard.contracts.bundle import (
+    BundleManifest,
+    CudaArchitectureBuild,
+    LocalWorkerBuild,
+    ReplayRequirements,
+    SourceBuildRequest,
+    WorkerBuildArgument,
+    canonical_cmake_cuda_architecture,
+    is_cmake_configure_command,
+)
 from upgrade_guard.contracts.common import ArtifactReference, FailureRecord
 from upgrade_guard.errors import InvalidInputError
 
@@ -29,8 +38,17 @@ class BundleExport:
     expected_failure: FailureRecord
     extra_files: Mapping[str, Path]
     source_files: Mapping[str, Path]
-    worker_image_manifest_digest: str | None = None
-    selected_gpu_uuid: str | None = None
+    original_worker_image_manifest_digest: str | None = None
+    original_gpu_uuid: str | None = None
+    base_image: str | None = None
+    base_image_manifest_digest: str | None = None
+    dockerfile: Path | None = None
+    worker_lock: Path | None = None
+    worker_build_arguments: tuple[tuple[str, str], ...] = ()
+    minimum_compute_capability: str | None = None
+    minimum_driver: str | None = None
+    minimum_vram_mib: int | None = None
+    original_compute_capability: str | None = None
     source_build_command: tuple[str, ...] = ()
     included_engine: Path | None = None
 
@@ -59,6 +77,11 @@ def export_bundle(request: BundleExport, destination: Path) -> BundleManifest:
             name = f"inputs/{index:03d}-{input_source.name}"
             input_names.append(name)
             authored[name] = input_source
+        if request.source_files:
+            if request.dockerfile is not None:
+                authored["containers/Dockerfile.worker"] = request.dockerfile
+            if request.worker_lock is not None:
+                authored["containers/requirements-worker.txt"] = request.worker_lock
         _merge_unique(authored, request.extra_files)
         _merge_unique(authored, request.source_files)
         engine_name: str | None = None
@@ -124,23 +147,73 @@ def _source_build(
     if not request.source_files:
         if any(
             (
-                request.worker_image_manifest_digest,
-                request.selected_gpu_uuid,
+                request.original_worker_image_manifest_digest,
+                request.original_gpu_uuid,
+                request.base_image,
+                request.base_image_manifest_digest,
+                request.dockerfile,
+                request.worker_lock,
+                request.worker_build_arguments,
+                request.minimum_compute_capability,
+                request.minimum_driver,
+                request.minimum_vram_mib,
+                request.original_compute_capability,
                 request.source_build_command,
             )
         ):
             raise InvalidInputError("source build metadata requires source files")
         return None
     if (
-        request.worker_image_manifest_digest is None
-        or request.selected_gpu_uuid is None
+        request.original_worker_image_manifest_digest is None
+        or request.original_gpu_uuid is None
+        or request.base_image is None
+        or request.base_image_manifest_digest is None
+        or request.dockerfile is None
+        or request.worker_lock is None
+        or not request.worker_build_arguments
+        or request.minimum_compute_capability is None
+        or request.minimum_driver is None
+        or request.minimum_vram_mib is None
         or not request.source_build_command
     ):
-        raise InvalidInputError("source-bearing bundles require image, GPU, and build command")
+        raise InvalidInputError(
+            "source-bearing bundles require original provenance, portable worker rebuild, "
+            "replay requirements, and source build command"
+        )
+    cuda_architecture: CudaArchitectureBuild | None = None
+    if request.original_compute_capability is not None:
+        try:
+            cuda_architecture = CudaArchitectureBuild(
+                original_compute_capability=request.original_compute_capability,
+                cmake_cuda_architecture=canonical_cmake_cuda_architecture(
+                    request.original_compute_capability
+                ),
+            )
+        except ValueError as error:
+            raise InvalidInputError("original compute capability is invalid") from error
+    if is_cmake_configure_command(request.source_build_command) and cuda_architecture is None:
+        raise InvalidInputError("CMake source builds require original compute capability evidence")
     return SourceBuildRequest(
         sources=tuple(references[name] for name in sorted(request.source_files)),
-        worker_image_manifest_digest=request.worker_image_manifest_digest,
-        selected_gpu_uuid=request.selected_gpu_uuid,
+        original_worker_image_manifest_digest=request.original_worker_image_manifest_digest,
+        original_gpu_uuid=request.original_gpu_uuid,
+        replay_requirements=ReplayRequirements(
+            minimum_compute_capability=request.minimum_compute_capability,
+            minimum_driver=request.minimum_driver,
+            minimum_vram_mib=request.minimum_vram_mib,
+        ),
+        cuda_architecture=cuda_architecture,
+        local_worker_build=LocalWorkerBuild(
+            base_image=request.base_image,
+            base_image_manifest_digest=request.base_image_manifest_digest,
+            dockerfile=references["containers/Dockerfile.worker"],
+            worker_lock=references["containers/requirements-worker.txt"],
+            build_arguments=tuple(
+                WorkerBuildArgument(name=name, value=value)
+                for name, value in request.worker_build_arguments
+            ),
+            cuda_architecture=cuda_architecture,
+        ),
         command=request.source_build_command,
     )
 
@@ -174,6 +247,8 @@ def _reference(relative: str, path: Path) -> ArtifactReference:
 
 
 def _media_type(path: str) -> str:
+    if path == "containers/Dockerfile.worker":
+        return "text/x-dockerfile"
     suffix = Path(path).suffix.lower()
     return {
         ".json": "application/json",
@@ -197,6 +272,8 @@ def _media_type(path: str) -> str:
 def _readme(request: BundleExport) -> str:
     trust = (
         "This bundle contains source code and requires --trust-source-code after review.\n"
+        "The original GPU UUID is provenance only; select a compatible replay GPU.\n"
+        "The worker is rebuilt locally from the hash-verified Dockerfile and lock.\n"
         if request.source_files
         else "This bundle contains no source build request.\n"
     )
@@ -206,6 +283,9 @@ def _readme(request: BundleExport) -> str:
         "Verify every artifact before replay.\n"
         f"{trust}"
         "Serialized engines and containers are executable trust boundaries.\n\n"
+        "The replay requires a Docker Registry v2 endpoint at 127.0.0.1:5500 by default.\n"
+        "Pass --gpu when more than one GPU is visible and --local-registry for another "
+        "operator-owned localhost endpoint.\n\n"
         "```bash\n"
         "upgrade-guard reproduce verify .\n"
         f"upgrade-guard reproduce run . --out ../replay{_trust_flags(request)}\n"

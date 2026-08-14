@@ -84,7 +84,9 @@ class QualificationSpec(StrictModel):
     kind: Literal["Qualification"]
     baseline_environment_id: str
     candidate_environment_id: str
+    environment_matrix: str | None = None
     environment_lock: str
+    reference_environment_lock: str
     corpus_lock_id: str
     corpus_root: str | None = None
     required_cases: tuple[str, ...]

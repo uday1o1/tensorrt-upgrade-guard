@@ -6,12 +6,14 @@ import json
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import yaml
 from pydantic import ValidationError
 
 from upgrade_guard.contracts.base import canonical_json_bytes, sha256_bytes, sha256_file
 from upgrade_guard.corpus.generators import generate_tiny_transformer
 from upgrade_guard.corpus.reference import (
+    ReferenceOutput,
     deterministic_transformer_inputs,
     run_onnx_reference,
     save_inputs,
@@ -33,7 +35,12 @@ def load_recipe(path: Path) -> CorpusRecipe:
         ) from error
 
 
-def materialize_corpus(recipe_path: Path, destination: Path) -> CorpusLock:
+def materialize_corpus(
+    recipe_path: Path,
+    destination: Path,
+    *,
+    reference_environment_sha256: str,
+) -> CorpusLock:
     """Generate, hash, reference-run, and atomically publish the corpus."""
 
     if destination.exists():
@@ -75,13 +82,21 @@ def materialize_corpus(recipe_path: Path, destination: Path) -> CorpusLock:
                     precision=precision,
                 )
                 save_inputs(staging / relative, inputs)
-                reference = run_onnx_reference(models[precision], inputs)
+                first_reference = run_onnx_reference(models[precision], inputs)
+                second_reference = run_onnx_reference(models[precision], inputs)
+                reference = _verify_reference_determinism(first_reference, second_reference)
                 for path in sorted((staging / relative).iterdir()):
                     artifacts.append(_artifact(staging, path, "application/x-npy"))
                 reference_path = (
                     staging / "reference" / f"tiny-transformer-{precision}-{shape.id}.json"
                 )
                 reference_path.parent.mkdir(parents=True, exist_ok=True)
+                for item in reference:
+                    expected_path = reference_path.with_name(
+                        f"{reference_path.stem}-{item.name}.npy"
+                    )
+                    np.save(expected_path, item.values, allow_pickle=False)
+                    artifacts.append(_artifact(staging, expected_path, "application/x-npy"))
                 reference_path.write_text(
                     json.dumps(
                         [
@@ -90,6 +105,8 @@ def materialize_corpus(recipe_path: Path, destination: Path) -> CorpusLock:
                                 "dtype": item.dtype,
                                 "shape": item.shape,
                                 "sha256": item.sha256,
+                                "repetitions": 2,
+                                "bitwise_deterministic": True,
                             }
                             for item in reference
                         ],
@@ -106,6 +123,7 @@ def materialize_corpus(recipe_path: Path, destination: Path) -> CorpusLock:
             kind="CorpusLock",
             id=recipe.id,
             recipe_sha256=recipe_hash,
+            reference_environment_sha256=reference_environment_sha256,
             artifacts=tuple(sorted(artifacts, key=lambda item: item.path)),
         )
         (staging / "corpus.lock.json").write_text(
@@ -123,3 +141,21 @@ def _artifact(root: Path, path: Path, media_type: str) -> MaterializedArtifact:
         bytes=path.stat().st_size,
         media_type=media_type,
     )
+
+
+def _verify_reference_determinism(
+    first: tuple[ReferenceOutput, ...],
+    second: tuple[ReferenceOutput, ...],
+) -> tuple[ReferenceOutput, ...]:
+    if len(first) != len(second):
+        raise InvalidInputError("reference output schema changed between repetitions")
+    for left, right in zip(first, second, strict=True):
+        if (
+            left.name != right.name
+            or left.dtype != right.dtype
+            or left.shape != right.shape
+            or left.sha256 != right.sha256
+            or not np.array_equal(left.values, right.values)
+        ):
+            raise InvalidInputError("reference output is not bitwise deterministic")
+    return first

@@ -230,6 +230,13 @@
   "additionalProperties": false,
   "description": "Small static report model with evidence links.",
   "properties": {
+    "acceptance_gates": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ResultStatus"
+      },
+      "title": "Acceptance Gates",
+      "type": "object"
+    },
     "api_version": {
       "const": "upgradeguard.dev/report/v1",
       "title": "Api Version",
@@ -243,6 +250,21 @@
       "title": "Candidate Environment Id",
       "type": "string"
     },
+    "corpus_provenance": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ArtifactReference"
+      },
+      "title": "Corpus Provenance",
+      "type": "array"
+    },
+    "environment_images": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Environment Images",
+      "type": "object"
+    },
     "evidence": {
       "items": {
         "$ref": "#/$defs/ArtifactReference"
@@ -251,6 +273,7 @@
       "type": "array"
     },
     "failed_count": {
+      "minimum": 0,
       "title": "Failed Count",
       "type": "integer"
     },
@@ -266,21 +289,125 @@
       "title": "Generated At",
       "type": "string"
     },
+    "gpu_uuid": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Gpu Uuid"
+    },
     "inconclusive_count": {
+      "minimum": 0,
       "title": "Inconclusive Count",
       "type": "integer"
     },
     "infrastructure_invalid_count": {
+      "minimum": 0,
       "title": "Infrastructure Invalid Count",
       "type": "integer"
     },
+    "limitations": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "matrix_lock_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Matrix Lock Sha256"
+    },
+    "measured_sections": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Measured Sections",
+      "type": "object"
+    },
+    "methodology": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Methodology",
+      "type": "array"
+    },
     "passed_count": {
+      "minimum": 0,
       "title": "Passed Count",
       "type": "integer"
     },
+    "publication_complete": {
+      "default": false,
+      "title": "Publication Complete",
+      "type": "boolean"
+    },
+    "reference_environment_lock_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reference Environment Lock Sha256"
+    },
+    "reproduction_commands": {
+      "default": [],
+      "items": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Reproduction Commands",
+      "type": "array"
+    },
     "result_count": {
+      "minimum": 0,
       "title": "Result Count",
       "type": "integer"
+    },
+    "results_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "source_git_commit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Git Commit"
     },
     "stack_attribution": {
       "title": "Stack Attribution",
@@ -294,6 +421,7 @@
       "type": "string"
     },
     "unsupported_count": {
+      "minimum": 0,
       "title": "Unsupported Count",
       "type": "integer"
     },

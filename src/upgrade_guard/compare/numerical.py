@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
 
-from upgrade_guard.contracts.common import NumericalTolerance
+from upgrade_guard.contracts.common import NumericalPolicy, NumericalTolerance
 from upgrade_guard.contracts.results import NumericalSummary
 from upgrade_guard.errors import FailureCode, InvalidInputError
 
@@ -27,12 +27,28 @@ class ThreeWayDecision:
     failed_gates: tuple[str, ...]
 
 
+class ThreeWayPrecedenceError(Exception):
+    """Typed case failure when schema-invalid arrays cannot produce numerical summaries."""
+
+    def __init__(
+        self,
+        failure_code: FailureCode,
+        failed_gates: tuple[str, ...],
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
+        self.failed_gates = failed_gates
+
+
 def compare_arrays(
     name: str,
     reference: Array,
     candidate: Array,
     policy: NumericalTolerance,
     *,
+    relative_error_guard: float,
+    semantics: Literal["classification"] | None = None,
     maximum_failed_indexes: int = 16,
 ) -> NumericalSummary:
     """Compute the complete elementwise numerical evidence for one output."""
@@ -57,17 +73,34 @@ def compare_arrays(
                 "candidate": str(candidate_array.dtype),
             },
         )
+    if not np.isfinite(relative_error_guard) or relative_error_guard <= 0:
+        raise InvalidInputError("relative-error guard must be finite and positive")
+    if semantics == "classification" and (
+        reference_array.ndim < 1 or reference_array.shape[-1] < 5
+    ):
+        raise InvalidInputError("classification semantics require at least five classes")
     reference_finite = np.isfinite(reference_array)
     candidate_finite = np.isfinite(candidate_array)
     reference_nonfinite = int(reference_array.size - np.count_nonzero(reference_finite))
     candidate_nonfinite = int(candidate_array.size - np.count_nonzero(candidate_finite))
-    safe_reference = np.nan_to_num(reference_array.astype(np.float64), copy=False)
-    safe_candidate = np.nan_to_num(candidate_array.astype(np.float64), copy=False)
+    safe_reference = np.nan_to_num(
+        reference_array.astype(np.float64),
+        copy=False,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    safe_candidate = np.nan_to_num(
+        candidate_array.astype(np.float64),
+        copy=False,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     absolute = np.abs(safe_candidate - safe_reference)
     threshold = policy.atol + policy.rtol * np.abs(safe_reference)
     failed = np.flatnonzero((absolute > threshold).reshape(-1))
-    guard = max(policy.atol, np.finfo(np.float64).eps)
-    relative = absolute / np.maximum(np.abs(safe_reference), guard)
+    relative = absolute / np.maximum(np.abs(safe_reference), relative_error_guard)
     reference_flat = safe_reference.reshape(-1)
     candidate_flat = safe_candidate.reshape(-1)
     denominator = float(np.linalg.norm(reference_flat) * np.linalg.norm(candidate_flat))
@@ -76,6 +109,27 @@ def compare_arrays(
         if denominator > 0
         else float(reference_flat.size == 0 or np.array_equal(reference_flat, candidate_flat))
     )
+    top1_agreement = None
+    top5_agreement = None
+    if semantics == "classification":
+        top1_agreement = bool(
+            np.array_equal(
+                np.argmax(safe_reference, axis=-1),
+                np.argmax(safe_candidate, axis=-1),
+            )
+        )
+        reference_top5 = np.argsort(safe_reference, axis=-1)[..., -5:]
+        candidate_top5 = np.argsort(safe_candidate, axis=-1)[..., -5:]
+        top5_agreement = bool(
+            all(
+                set(reference_row) == set(candidate_row)
+                for reference_row, candidate_row in zip(
+                    reference_top5.reshape(-1, 5),
+                    candidate_top5.reshape(-1, 5),
+                    strict=True,
+                )
+            )
+        )
     return NumericalSummary(
         output_name=name,
         element_count=int(reference_array.size),
@@ -92,8 +146,8 @@ def compare_arrays(
         failed_element_count=int(failed.size),
         failed_element_indexes=tuple(int(item) for item in failed[:maximum_failed_indexes]),
         elementwise_passed=not reference_nonfinite and not candidate_nonfinite and not failed.size,
-        top1_agreement=None,
-        top5_agreement=None,
+        top1_agreement=top1_agreement,
+        top5_agreement=top5_agreement,
     )
 
 
@@ -103,16 +157,92 @@ def decide_three_way(
     baseline: Array,
     candidate: Array,
     *,
-    baseline_policy: NumericalTolerance,
-    candidate_policy: NumericalTolerance,
-    drift_policy: NumericalTolerance,
+    policy: NumericalPolicy,
+    semantics: Literal["classification"] | None = None,
 ) -> ThreeWayDecision:
     """Apply the locked precedence and three-way numerical decision table."""
 
-    baseline_result = compare_arrays(name, reference, baseline, baseline_policy)
-    candidate_result = compare_arrays(name, reference, candidate, candidate_policy)
-    drift_result = compare_arrays(name, baseline, candidate, drift_policy)
-    if not baseline_result.elementwise_passed:
+    reference_array = np.asarray(reference)
+    baseline_array = np.asarray(baseline)
+    candidate_array = np.asarray(candidate)
+    if (
+        reference_array.shape != baseline_array.shape
+        or reference_array.dtype != baseline_array.dtype
+    ):
+        raise ThreeWayPrecedenceError(
+            FailureCode.CORPUS_INVALID,
+            ("baseline_output_schema",),
+            "baseline output schema differs from the locked reference",
+        )
+    if (
+        reference_array.shape != candidate_array.shape
+        or reference_array.dtype != candidate_array.dtype
+    ):
+        raise ThreeWayPrecedenceError(
+            FailureCode.OUTPUT_SCHEMA_CHANGED,
+            ("candidate_output_schema",),
+            "candidate output schema differs from the locked reference",
+        )
+    if semantics == "classification" and (
+        reference_array.ndim < 1 or reference_array.shape[-1] < 5
+    ):
+        raise ThreeWayPrecedenceError(
+            FailureCode.CORPUS_INVALID,
+            ("reference_output_schema",),
+            "classification reference schema has fewer than five classes",
+        )
+    baseline_result = compare_arrays(
+        name,
+        reference_array,
+        baseline_array,
+        policy.baseline_to_reference,
+        relative_error_guard=policy.relative_error_guard,
+        semantics=semantics,
+    )
+    candidate_result = compare_arrays(
+        name,
+        reference_array,
+        candidate_array,
+        policy.candidate_to_reference,
+        relative_error_guard=policy.relative_error_guard,
+        semantics=semantics,
+    )
+    drift_result = compare_arrays(
+        name,
+        baseline_array,
+        candidate_array,
+        policy.candidate_to_baseline,
+        relative_error_guard=policy.relative_error_guard,
+        semantics=semantics,
+    )
+    if baseline_result.reference_nonfinite_count:
+        return ThreeWayDecision(
+            baseline_result,
+            candidate_result,
+            drift_result,
+            False,
+            FailureCode.CORPUS_INVALID,
+            ("reference_nonfinite",),
+        )
+    if baseline_result.candidate_nonfinite_count:
+        return ThreeWayDecision(
+            baseline_result,
+            candidate_result,
+            drift_result,
+            False,
+            FailureCode.CORPUS_INVALID,
+            ("baseline_nonfinite",),
+        )
+    if candidate_result.candidate_nonfinite_count:
+        return ThreeWayDecision(
+            baseline_result,
+            candidate_result,
+            drift_result,
+            False,
+            FailureCode.NONFINITE_OUTPUT,
+            ("candidate_nonfinite",),
+        )
+    if not _gate_passed(baseline_result, policy, semantics):
         return ThreeWayDecision(
             baseline_result,
             candidate_result,
@@ -127,7 +257,7 @@ def decide_three_way(
             ("candidate_to_reference", candidate_result),
             ("candidate_to_baseline", drift_result),
         )
-        if not result.elementwise_passed
+        if not _gate_passed(result, policy, semantics)
     )
     return ThreeWayDecision(
         baseline_result,
@@ -136,6 +266,21 @@ def decide_three_way(
         not failed,
         FailureCode.NUMERICAL_REGRESSION if failed else None,
         failed,
+    )
+
+
+def _gate_passed(
+    result: NumericalSummary,
+    policy: NumericalPolicy,
+    semantics: Literal["classification"] | None,
+) -> bool:
+    if not result.elementwise_passed:
+        return False
+    if semantics != "classification":
+        return True
+    return not (
+        (policy.require_top1_agreement and result.top1_agreement is not True)
+        or (policy.require_top5_agreement and result.top5_agreement is not True)
     )
 
 

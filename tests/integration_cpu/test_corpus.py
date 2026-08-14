@@ -14,9 +14,11 @@ from upgrade_guard.contracts.base import sha256_file
 from upgrade_guard.corpus.generators import generate_plugin_micrograph, generate_tiny_transformer
 from upgrade_guard.corpus.materialize import load_recipe, materialize_corpus
 from upgrade_guard.corpus.mobilenet import (
+    IMAGE_FIXTURES,
     derive_dynamic_mobilenet,
     deterministic_image_input,
     download_source,
+    preprocess_ppm_fixture,
 )
 from upgrade_guard.corpus.plugin import CASES, materialize_plugin_corpus
 from upgrade_guard.corpus.reference import (
@@ -28,6 +30,7 @@ from upgrade_guard.errors import InvalidInputError
 
 FP32_SHA = "sha256:16dd39f7df92632a0d9268b0b669ee8e110d0bce6b2da189fd046e3b4d2e71b4"
 FP16_SHA = "sha256:46687e2f106b1439655e641944a2bb251f40cc7ae673814fa81a383b8f5ec2d5"
+REFERENCE_SHA = "sha256:" + ("e" * 64)
 
 
 def test_transformer_models_are_locked_valid_and_cpu_executable(tmp_path: Path) -> None:
@@ -100,12 +103,20 @@ transformer_shapes:
         encoding="utf-8",
     )
     destination = tmp_path / "materialized"
-    lock = materialize_corpus(recipe, destination)
+    lock = materialize_corpus(
+        recipe,
+        destination,
+        reference_environment_sha256=REFERENCE_SHA,
+    )
     assert lock.id == "smoke"
     assert (destination / "corpus.lock.json").is_file()
-    assert len(lock.artifacts) == 4
+    assert len(lock.artifacts) == 5
     with pytest.raises(InvalidInputError, match="already exists"):
-        materialize_corpus(recipe, destination)
+        materialize_corpus(
+            recipe,
+            destination,
+            reference_environment_sha256=REFERENCE_SHA,
+        )
 
     recipe.write_text(recipe.read_text().replace("id: smoke", "id: smoke\nunknown: true"))
     with pytest.raises(InvalidInputError, match="corpus recipe is invalid"):
@@ -114,9 +125,15 @@ transformer_shapes:
 
 def test_plugin_corpus_is_complete_and_locked(tmp_path: Path) -> None:
     destination = tmp_path / "plugin"
-    lock = materialize_plugin_corpus(destination)
+    lock = materialize_plugin_corpus(
+        destination,
+        reference_environment_sha256=REFERENCE_SHA,
+    )
     assert lock["cases"] == [case.id for case in CASES]
-    assert len(lock["artifacts"]) == 62
+    assert len(lock["artifacts"]) == 63
+    extended = lock["extended_manifest"]
+    assert extended["path"] == "extended-corpus-manifest.json"
+    assert extended["sha256"] == sha256_file(destination / extended["path"])
     for artifact in lock["artifacts"]:
         path = destination / str(artifact["path"])
         assert path.stat().st_size == artifact["bytes"]
@@ -129,7 +146,10 @@ def test_plugin_corpus_is_complete_and_locked(tmp_path: Path) -> None:
         == 0
     )
     with pytest.raises(InvalidInputError, match="already exists"):
-        materialize_plugin_corpus(destination)
+        materialize_plugin_corpus(
+            destination,
+            reference_environment_sha256=REFERENCE_SHA,
+        )
 
 
 class _Response:
@@ -194,3 +214,27 @@ def test_mobilenet_download_derivation_and_inputs(
     np.testing.assert_array_equal(first, second)
     with pytest.raises(InvalidInputError, match="outside the locked profile"):
         deterministic_image_input(1, 159, 224)
+
+
+def test_locked_ppm_assets_have_deterministic_preprocessing(tmp_path: Path) -> None:
+    project = Path(__file__).resolve().parents[2]
+    observed = {}
+    for name, (relative_path, expected_hash) in IMAGE_FIXTURES.items():
+        first = preprocess_ppm_fixture(project / relative_path, expected_hash)
+        second = preprocess_ppm_fixture(project / relative_path, expected_hash)
+        assert first.preprocessing == "imagenet-rgb-nearest-v1"
+        assert first.values.shape == (1, 3, 224, 224)
+        assert first.values.dtype == np.float32
+        assert first.tensor_sha256 == second.tensor_sha256
+        np.testing.assert_array_equal(first.values, second.values)
+        observed[name] = first.tensor_sha256
+    assert observed == {
+        "image-gradient": "sha256:a26325dbb684791cfd67f89adb3bd9e2d3fff2941004ec357021ae08201b0b4c",
+        "image-checkerboard": (
+            "sha256:e035531d667950a941579d8e7ef6e64b5711c0970467e10b31d4908031b1f65d"
+        ),
+    }
+    altered = tmp_path / "gradient.ppm"
+    altered.write_bytes((project / "models/assets/gradient.ppm").read_bytes() + b"\n")
+    with pytest.raises(InvalidInputError, match="hash changed"):
+        preprocess_ppm_fixture(altered, IMAGE_FIXTURES["image-gradient"][1])

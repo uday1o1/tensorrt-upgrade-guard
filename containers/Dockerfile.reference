@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG BASE_MANIFEST_DIGEST
+
+COPY containers/requirements-reference.txt /tmp/requirements-reference.txt
+RUN python3 -m pip install --no-cache-dir --require-hashes \
+      --requirement /tmp/requirements-reference.txt \
+    && python3 -m pip check
+
+LABEL com.udayarora.upgradeguard.reference="onnxruntime-cpu" \
+      com.udayarora.upgradeguard.base-manifest-digest="${BASE_MANIFEST_DIGEST}"
