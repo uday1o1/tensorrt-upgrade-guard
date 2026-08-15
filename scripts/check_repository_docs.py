@@ -1,4 +1,4 @@
-"""Check public Markdown links and immutable GitHub Action references."""
+"""Check internal links in public Markdown documentation."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"\[[^]]+\]\(([^)]+)\)")
-USES = re.compile(r"^\s*uses:\s*[^@\s]+@([0-9a-f]{40})(?:\s*#.*)?$")
 
 
 def _check_markdown() -> list[str]:
@@ -26,22 +25,11 @@ def _check_markdown() -> list[str]:
     return failures
 
 
-def _check_actions() -> list[str]:
-    failures: list[str] = []
-    for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
-        for number, line in enumerate(workflow.read_text(encoding="utf-8").splitlines(), start=1):
-            if "uses:" in line and not USES.fullmatch(line):
-                failures.append(
-                    f"{workflow.relative_to(ROOT)}:{number}: action must use a 40-character SHA"
-                )
-    return failures
-
-
 def main() -> None:
-    failures = [*_check_markdown(), *_check_actions()]
+    failures = _check_markdown()
     if failures:
         raise SystemExit("\n".join(failures))
-    print("Documentation links and action pins are valid.")
+    print("Documentation links are valid.")
 
 
 if __name__ == "__main__":

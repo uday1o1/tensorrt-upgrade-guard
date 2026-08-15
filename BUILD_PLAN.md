@@ -4,10 +4,41 @@
 
 This file is the implementation authority for TensorRT UpgradeGuard V1.
 An implementation agent should read the entire file before changing the repository.
-The project is currently an empty Git repository, so every path below is proposed rather than existing.
-The agent should implement milestones in order and must not publish benchmark claims until the hardware and environment validity gates pass.
+The repository now contains the complete host control plane, GPU worker path, CUDA plugin, qualification runner, fault corpus, tests, and project documentation described below.
+The agent must preserve milestone acceptance order and must not publish benchmark claims until the hardware and environment validity gates pass.
 The only unresolved external input is the exact NVIDIA GPU and host driver available for final qualification.
 That uncertainty is handled by Milestone 0 and must not be guessed away.
+
+### 1.1 Current implementation and acceptance status
+
+Implementation progress and milestone acceptance are tracked separately.
+All locally implementable work for Milestones 0 through 10 is present in the repository.
+The complete local verification command passes on the development workstation.
+No real GPU qualification evidence has been accepted or published.
+
+| Milestone | Implementation state | Acceptance state |
+| --- | --- | --- |
+| M0 | Hardware discovery, Docker GPU preflight, image resolution, compatibility checks, and matrix locking are implemented. | Deferred until both immutable workers launch on one compatible Linux x86-64 NVIDIA GPU. |
+| M1 | Contracts, schemas, failure taxonomy, CLI fixtures, reports, and bundle safety are implemented. | Local macOS verification passes; the same local gate must be rerun on the Linux qualification host. |
+| M2-M6 | Worker orchestration, corpus materialization, qualification, statistics, failure reduction, and replay are implemented with CPU fixtures and simulated boundaries. | Target acceptance is deferred because the real workers, engines, and GPU measurements do not exist yet. |
+| M7-M9 | `IPluginV3`, CUDA tactics, fault fixtures, sanitizer commands, profiler commands, and evidence validation are implemented. | Target correctness, sanitizer, optimization, and profiler gates are deferred. |
+| M10 | Portfolio documentation, demo instructions, evidence contracts, and publication safeguards are implemented. | Final publication remains deferred until the complete real GPU evidence index passes review. |
+
+Resume from M0 on a clean `main` checkout rather than repeating local implementation.
+
+```bash
+git switch main
+git pull --ff-only origin main
+uv sync --frozen
+make verify
+uv run --frozen upgrade-guard doctor --json
+run_root=".upgrade-guard/qualification/runs/$(git rev-parse HEAD)"
+uv run --frozen upgrade-guard qualify qualification/full.yaml \
+  --project-root . --out "${run_root}"
+```
+
+If the target run exposes an implementation defect, fix only the failing boundary, rerun `make verify`, resume the same qualification command, and preserve the generated hardware evidence outside Git.
+After a coherent fix passes, commit and push directly to `main` with ordinary `git add`, `git commit`, and `git push origin main` commands.
 
 ## 2. Product definition
 
@@ -723,120 +754,55 @@ Every defect requires a nearby clean control.
 
 ## 23. Repository layout
 
+This is the current high-level ownership map.
+Use `rg --files` for the exact tracked inventory instead of treating this summary as an exhaustive tree.
+
 ```text
 tensorrt-upgrade-guard/
   BUILD_PLAN.md
   README.md
-  LICENSE
-  SECURITY.md
-  CONTRIBUTING.md
   Makefile
   pyproject.toml
   uv.lock
   CMakeLists.txt
-  cmake/
-    FindTensorRT.cmake
   src/upgrade_guard/
-    __init__.py
-    cli.py
-    errors.py
-    contracts/
-      qualification.py
-      environment.py
-      reference_environment.py
-      case.py
-      build.py
-      results.py
-    matrix/
-      lock.py
-      probe.py
-      compatibility.py
-      digest.py
-    corpus/
-      registry.py
-      materialize.py
-      verify.py
-      attribution.py
-    containers/
-      commands.py
-      runtime.py
-      security.py
-    worker/
-      build_engine.py
-      run_reference.py
-      run_correctness.py
-      run_benchmark.py
-      inspect_engine.py
-    compare/
-      classify.py
-      numerical.py
-      determinism.py
-      performance.py
-      memory.py
-      validity.py
-    reduce/
-      predicate.py
-      shapes.py
-      inputs.py
-      options.py
-      polygraphy.py
-      versions.py
-    reproduce/
-      bundle.py
-      verify.py
-      run.py
-    report/
-      model.py
-      text.py
-      json_report.py
-      html_report.py
+    cli.py                     # public command surface
+    orchestrator.py            # checked-in qualification entry point
+    qualification.py           # host qualification control plane
+    contracts/                 # strict authored and machine contracts
+    matrix/                    # image, host, and compatibility locking
+    corpus/                    # frozen corpus materialization
+    containers/                # isolated Docker execution
+    worker/                    # in-container build and execution commands
+    compare/                   # correctness, determinism, performance, and memory gates
+    reduce/                    # bounded failure reduction
+    reproduce/                 # bundle creation, verification, and replay
+    report/                    # text, JSON, and HTML reports
+  scripts/
+    run_gpu_qualification.sh   # resumable hardware qualification runner
+    qualification_state.py     # source-bound completion markers
+    generate_remote_evidence.py
+    generate_schemas.py
+    check_repository_docs.py
   schemas/
-    qualification.schema.json
-    environment-lock.schema.json
-    reference-environment-lock.schema.json
-    case.schema.json
-    build.schema.json
-    result.schema.json
-    bundle.schema.json
+    *.schema.json
   cpp/
-    plugin/
-      residual_rmsnorm_plugin.hpp
-      residual_rmsnorm_plugin.cpp
-      residual_rmsnorm_creator.cpp
-      register_plugin.cpp
-    kernels/
-      residual_rmsnorm_naive.cu
-      residual_rmsnorm_optimized.cu
-      residual_rmsnorm_launch.hpp
-    tests/
-      plugin_smoke.cpp
-      kernel_tests.cu
-    faults/
-      numerical_fault.cu
-      tail_oob_fault.cu
-      delay_fault.cu
-      serialization_fault.cpp
+    plugin/                    # `IPluginV3` implementation
+    kernels/                   # scalar and optimized CUDA tactics
+    tests/                     # plugin and kernel checks
+    faults/                    # bounded seeded GPU defects
   containers/
     Dockerfile.worker
+    Dockerfile.reference
+    requirements-*.txt
   matrices/
     examples/
       controlled-minor.yaml
-      cross-major.yaml
   qualification/
-    smoke.yaml
     full.yaml
-    plugin.yaml
-    compatibility.yaml
   models/
-    registry.yaml
     generators/
-      tiny_transformer.py
-      derive_dynamic_mobilenet.py
-      plugin_micrograph.py
     locks/
-      tiny_transformer.lock.json
-      mobilenetv3.lock.json
-      plugin_micrograph.lock.json
   corpus/
     registry.yaml
     attribution.yaml
@@ -844,30 +810,10 @@ tensorrt-upgrade-guard/
     unit/
     integration_cpu/
     fixtures/
-      manifests/
-      results/
-      bundles/
-    gpu/
   docs/
-    architecture.md
-    compatibility.md
-    corpus.md
-    numerical-policy.md
-    determinism-policy.md
-    benchmarking-methodology.md
-    plugin-design.md
-    profiling-workflow.md
-    reproduction-format.md
-    security-model.md
-    limitations.md
+    remote-qualification.md     # exact resume procedure and external prerequisites
   reports/
-    README.md
     published/
-  .github/workflows/
-    cpu-ci.yml
-    gpu-smoke.yml
-    gpu-qualification.yml
-    gpu-sanitizer.yml
 ```
 
 Generated engines, timing caches, raw input expansions, run directories, large Nsight reports, and worker build products are ignored.
@@ -973,7 +919,7 @@ Implement every typed contract, result directory, stable failure taxonomy, JSON 
 
 Gate:
 
-- Full CPU CI passes on macOS and Linux.
+- The complete local CPU gate passes on macOS and Linux.
 - Every failure code has a stored result fixture.
 - Unknown fields and unsafe bundles fail closed.
 - Importing the package does not require CUDA or TensorRT.
@@ -1087,29 +1033,24 @@ Milestones 6 through 10 form the extended NVIDIA track with reduction, reproduct
 The README and resume must state which gate the repository has actually reached.
 The extended definition remains the full V1 target, but failure to finish it does not erase a completed and documented core qualifier.
 
-## 28. CI design
+## 28. Local and target verification
 
-`cpu-ci.yml` runs on Ubuntu and macOS and covers Ruff, static typing, pytest, schemas, model generation, ONNX checks, CPU references, stored worker fixtures, statistical calculations, reduction logic, bundle security, and report generation.
-This workflow proves the control plane has no accidental GPU dependency.
+`make verify` is the complete local control-plane gate.
+It regenerates schemas, rejects schema drift, validates internal documentation links, runs Ruff formatting and lint checks, runs strict mypy, and executes the configured branch-coverage suite.
+Run it before every direct commit to `main` and again on the Linux qualification host before hardware work.
 
-`gpu-smoke.yml` runs manually and on trusted main changes using labels such as `[self-hosted, linux, x64, gpu, tensorrt-upgradeguard]`.
-It compiles the plugin, builds one engine, executes bounded shapes, and retains manifests.
+The public `upgrade-guard qualify` command is the complete target-hardware gate.
+It invokes the checked-in resumable runner, selects one GPU UUID, rejects competing processes and invalid hardware observations, cleans only project-owned resources, and retains generated evidence outside Git.
+The lower-level `UG_SMOKE_ONLY=1 bash scripts/run_gpu_qualification.sh` and `UG_SANITIZER_ONLY=1 bash scripts/run_gpu_qualification.sh` modes remain available for bounded diagnosis.
 
-`gpu-qualification.yml` runs manually or on an approved schedule against two locked environments.
-It executes the full correctness and performance matrix.
-
-`gpu-sanitizer.yml` runs manually or on an approved schedule and contains only focused plugin cases.
-
-Public fork pull requests must never execute on the self-hosted GPU runner.
-GPU workflows require environment approval, hardware-specific concurrency, selected GPU UUID, competing-process checks, exact resource cleanup, and no broad Docker cleanup commands.
+Run GPU qualification only from a reviewed, clean commit on a trusted host.
 Performance results from unverified shared cloud hardware are exploratory and cannot update published claims.
 
 ## 29. Security and supply-chain requirements
 
 The repository documents container and engine trust boundaries in `SECURITY.md`.
 OCI image digests, Python and system dependency locks, model hashes, input hashes, plugin source hashes, compiler commands, and report checksums are required.
-Third-party GitHub Actions are pinned by immutable commit SHA.
-GPU workflows do not expose long-lived registry credentials to untrusted code.
+GPU qualification must not expose long-lived registry credentials to untrusted code.
 Worker network access is disabled after image and corpus materialization.
 Subprocess arguments are passed as arrays and never through an interpolated shell command.
 Logs redact registry credentials and environment secrets.
@@ -1203,8 +1144,8 @@ TensorRT UpgradeGuard V1 is complete only when all conditions below are true.
 - Reproduction rebuilds engines and verifies every source hash.
 - The clean `IPluginV3` passes reference and sanitizer gates.
 - The optimized CUDA tactic has measured and profiled evidence.
-- CPU CI works on macOS without NVIDIA software.
-- Self-hosted GPU CI cannot run untrusted fork code.
+- The complete local gate works on macOS without NVIDIA software.
+- GPU qualification runs only from a reviewed, clean commit on a trusted host.
 - Public claims are scoped to the tested stack and hardware.
 
 ## 33. Implementation-agent rules
@@ -1215,7 +1156,7 @@ It should freeze model transformations outside the compared workers.
 It should use official TensorRT, CUDA, Polygraphy, Compute Sanitizer, and Nsight documentation for current APIs.
 It should benchmark before profiling and profile only a confirmed narrow problem.
 It should add a clean control beside every seeded defect.
-It should not deserialize untrusted engines or run untrusted GPU CI code.
+It should not deserialize untrusted engines or run untrusted source on the GPU host.
 It should not add Triton Server, Dynamo, Kubernetes, quantization variants, or a learned planner before V1 is complete.
 It should keep claims narrower than the evidence and preserve raw small tables behind charts.
 

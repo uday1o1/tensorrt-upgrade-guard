@@ -411,17 +411,6 @@ def test_builder_logger_retains_structured_warnings() -> None:
     assert logger.messages == [{"severity": "WARNING", "message": "bounded warning"}]
 
 
-def test_gpu_workflows_do_not_upload_generated_state() -> None:
-    workflow_root = Path(".github/workflows")
-    for name in ("gpu-smoke.yml", "gpu-qualification.yml", "gpu-sanitizer.yml"):
-        text = (workflow_root / name).read_text(encoding="utf-8")
-        assert "upload-artifact" not in text
-        assert ".upgrade-guard/cuda-pm" not in text
-    smoke = (workflow_root / "gpu-smoke.yml").read_text(encoding="utf-8")
-    for trigger in ("corpus/**", "matrices/**", "models/**", "qualification/**", "scripts/**"):
-        assert f'      - "{trigger}"' in smoke
-
-
 def test_worker_build_context_excludes_repository_state() -> None:
     assert Path(".dockerignore").read_text(encoding="utf-8").splitlines() == [
         "**",

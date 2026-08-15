@@ -55,7 +55,7 @@ The host package does not import them.
 
 ## Verify the CPU control plane
 
-Install the locked environment and run the same gate used by CPU CI.
+Install the locked environment and run the complete local control-plane gate.
 
 ```bash
 uv sync --frozen
@@ -65,7 +65,7 @@ make verify
 Expected success ends with all tests passing, coverage at or above 90 percent, and this message:
 
 ```text
-Documentation links and action pins are valid.
+Documentation links are valid.
 ```
 
 ## Run the complete qualification
@@ -79,12 +79,12 @@ uv run --frozen upgrade-guard doctor --json
 Then run the resumable qualification from a clean tracked checkout.
 
 ```bash
-run_root=".upgrade-guard/cuda-pm/runs/$(git rev-parse HEAD)"
+run_root=".upgrade-guard/qualification/runs/$(git rev-parse HEAD)"
 uv run --frozen upgrade-guard qualify qualification/full.yaml \
   --project-root . --out "${run_root}"
 ```
 
-The checked-in `scripts/run_cuda_pm_qualification.sh` command is the lower-level resumable runner used by the public CLI and trusted GPU workflows.
+The checked-in `scripts/run_gpu_qualification.sh` command is the lower-level resumable runner used by the public CLI.
 
 The runner locks the selected GPU and worker identities, materializes the corpora, and proves both exact workers can build and reload representative engines before long statistical gates.
 It then runs the core and extended gates, executes sanitizer seeds and controls, captures post-benchmark focused profiles, validates worker SBOMs, and writes a final evidence index.
@@ -92,7 +92,7 @@ It then runs the core and extended gates, executes sanitizer seeds and controls,
 A successful run ends with a line shaped like this:
 
 ```text
-COMPLETE evidence=<repository>/.upgrade-guard/cuda-pm/runs/<commit>/evidence.json
+COMPLETE evidence=<repository>/.upgrade-guard/qualification/runs/<commit>/evidence.json
 ```
 
 The runner stores source-revision-specific completion markers.
@@ -111,7 +111,7 @@ sudo systemctl restart docker
 Select a different visible GPU by index when needed.
 
 ```bash
-UG_GPU_INDEX=1 bash scripts/run_cuda_pm_qualification.sh
+UG_GPU_INDEX=1 bash scripts/run_gpu_qualification.sh
 ```
 
 Refer to [Run a remote qualification](docs/remote-qualification.md) for the full procedure and troubleshooting signals.

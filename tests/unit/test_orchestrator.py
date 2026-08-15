@@ -172,7 +172,7 @@ def _project(tmp_path: Path) -> tuple[Path, Path, Path]:
         (project / directory).mkdir(parents=True, exist_ok=True)
     for name in ("BUILD_PLAN.md", "pyproject.toml", "uv.lock", "CMakeLists.txt"):
         (project / name).write_text("fixture\n", encoding="utf-8")
-    runner = project / "scripts" / "run_cuda_pm_qualification.sh"
+    runner = project / "scripts" / "run_gpu_qualification.sh"
     runner.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     matrix = project / "matrices" / "pair.yaml"
     matrix.write_text("kind: EnvironmentMatrix\n", encoding="utf-8")
@@ -195,7 +195,7 @@ def test_full_runner_uses_explicit_project_matrix_and_resumable_output(tmp_path:
         capture_output=True,
     )
     assert outcome.status == "passed"
-    assert executor.command == ("bash", str(project / "scripts/run_cuda_pm_qualification.sh"))
+    assert executor.command == ("bash", str(project / "scripts/run_gpu_qualification.sh"))
     assert executor.environment["UG_QUALIFICATION_SPEC"] == str(specification)
     assert executor.environment["UG_MATRIX_TEMPLATE"] == str(matrix)
     assert executor.environment["UG_STATE_ROOT"] == str(output)
@@ -601,7 +601,7 @@ def test_full_runner_rejects_untrusted_project_and_runner_paths(tmp_path: Path) 
             project_root=project_file,
         )
 
-    runner = project / "scripts" / "run_cuda_pm_qualification.sh"
+    runner = project / "scripts" / "run_gpu_qualification.sh"
     replacement = tmp_path / "replacement-runner.sh"
     replacement.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     runner.unlink()

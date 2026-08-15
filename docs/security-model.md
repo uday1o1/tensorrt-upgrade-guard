@@ -16,7 +16,7 @@ Only the source, corpus, and output paths mount into the worker.
 The environment lock records exact OCI manifest and configuration digests.
 The Python environment uses `uv.lock` and exact direct dependency versions.
 Model and input locks preserve SHA-256 identities.
-GitHub Actions use immutable 40-character commit SHAs.
+Local verification runs from the locked Python environment and an exact clean source commit.
 
 The remote runner generates SPDX package inventories for both exact derived workers and binds each document to its immutable image identity.
 Publication audits the exact host Python lock and hash-locked Python packages added by the worker and independent reference Dockerfiles.

@@ -104,7 +104,7 @@ def log_inventory(state: Path) -> tuple[list[dict[str, object]], int]:
 
 
 def _resume_command(mode: str) -> list[str]:
-    command = ["bash", "scripts/run_cuda_pm_qualification.sh"]
+    command = ["bash", "scripts/run_gpu_qualification.sh"]
     if mode == "smoke":
         return ["env", "UG_SMOKE_ONLY=1", *command]
     if mode == "sanitizer":

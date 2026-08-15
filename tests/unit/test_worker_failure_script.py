@@ -51,7 +51,7 @@ def test_strict_worker_failure_crosses_real_process_boundary(tmp_path: Path) -> 
 
 
 def test_runner_routes_strict_worker_failures_through_extended_validators() -> None:
-    runner = (SCRIPT.parent / "run_cuda_pm_qualification.sh").read_text(encoding="utf-8")
+    runner = (SCRIPT.parent / "run_gpu_qualification.sh").read_text(encoding="utf-8")
     helper = runner[
         runner.index("run_extended_worker() {") : runner.index("run_core_qualification() {")
     ]

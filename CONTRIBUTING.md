@@ -16,7 +16,7 @@ Python 3.12 is required.
 make verify
 ```
 
-This command regenerates schemas, checks for drift, validates documentation links and action pins, runs Ruff, runs strict mypy, and executes the coverage suite.
+This command regenerates schemas, checks for drift, validates internal documentation links, runs Ruff, runs strict mypy, and executes the coverage suite.
 
 Run the closest real public CLI path when changing user-facing behavior.
 Add a clean control beside every new fault seed.

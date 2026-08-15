@@ -115,7 +115,7 @@ class FullQualificationRunner:
 
         specification = specification_path.resolve(strict=True)
         project = _project_root(specification, project_root)
-        runner = project / "scripts" / "run_cuda_pm_qualification.sh"
+        runner = project / "scripts" / "run_gpu_qualification.sh"
         if not runner.is_file() or runner.is_symlink():
             raise InvalidInputError("project root lacks the trusted qualification runner")
         selected_matrix = _matrix_path(specification, project, matrix_path)
@@ -189,7 +189,7 @@ def _project_root(specification: Path, explicit: Path | None) -> Path:
         return _validate_project(candidate)
     for candidate in (specification.parent, *specification.parents):
         if (candidate / "BUILD_PLAN.md").is_file() and (
-            candidate / "scripts" / "run_cuda_pm_qualification.sh"
+            candidate / "scripts" / "run_gpu_qualification.sh"
         ).is_file():
             return _validate_project(candidate)
     raise InvalidInputError(

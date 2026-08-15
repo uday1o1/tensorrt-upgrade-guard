@@ -56,7 +56,7 @@ def test_diagnostic_is_atomic_redacted_and_uses_only_local_pointers(
         "unsafe_entry_count": 0,
     }
     assert payload["logs"] == [{"path": "logs/core-qualification.log", "bytes": len(secret)}]
-    assert payload["resume_command"] == ["bash", "scripts/run_cuda_pm_qualification.sh"]
+    assert payload["resume_command"] == ["bash", "scripts/run_gpu_qualification.sh"]
     assert not list((state / "diagnostics").glob(f".{output.name}.*"))
 
 
@@ -112,6 +112,6 @@ def test_smoke_resume_command_is_exact(tmp_path: Path) -> None:
         "env",
         "UG_SMOKE_ONLY=1",
         "bash",
-        "scripts/run_cuda_pm_qualification.sh",
+        "scripts/run_gpu_qualification.sh",
     ]
     assert os.path.commonpath((str(output.resolve()), str(state.resolve()))) == str(state.resolve())

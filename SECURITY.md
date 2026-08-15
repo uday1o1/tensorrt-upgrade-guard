@@ -29,8 +29,8 @@ Use an ephemeral GPU host for third-party source-bearing bundles.
 Qualification workers receive no network, Docker socket, added capability, or writable source mount.
 The host still trusts Docker, the NVIDIA runtime, the selected images, compilers, and kernel driver.
 
-Do not run trusted GPU workflows on unreviewed fork pull requests.
-The checked-in GPU workflows have no pull-request trigger and require the `trusted-gpu` environment.
+Run GPU qualification only from a reviewed, clean commit whose source and dependency changes are trusted.
+Never execute unreviewed third-party code on a credentialed or persistent GPU host.
 
 ## Secrets and artifacts
 

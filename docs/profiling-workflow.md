@@ -9,7 +9,7 @@
 Run the full resumable qualification or resume through the profile step.
 
 ```bash
-UG_THROUGH_STEP=profiles bash scripts/run_cuda_pm_qualification.sh
+UG_THROUGH_STEP=profiles bash scripts/run_gpu_qualification.sh
 ```
 
 The runner records `nsys --version` and `ncu --version` inside the exact candidate worker.

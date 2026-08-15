@@ -23,14 +23,14 @@ The runner refuses tracked or untracked source-tree changes because the evidence
 ## Run the workflow
 
 ```bash
-run_root=".upgrade-guard/cuda-pm/runs/$(git rev-parse HEAD)"
+run_root=".upgrade-guard/qualification/runs/$(git rev-parse HEAD)"
 uv run --frozen upgrade-guard qualify qualification/full.yaml \
   --project-root . --out "${run_root}"
 ```
 
 The public command invokes the checked-in resumable runner without shell interpolation.
 
-The command creates `.upgrade-guard/cuda-pm/runs/<commit>` for logs, builds, run data, reports, profiles, SBOMs, and completion markers.
+The command creates `.upgrade-guard/qualification/runs/<commit>` for logs, builds, run data, reports, profiles, SBOMs, and completion markers.
 Generated corpora are published once under `.upgrade-guard/corpora/by-id/<kind>/<materializer-hash>` and referenced by a source-run corpus index.
 Each source commit has an isolated state directory, so a resumed run cannot mix artifacts from different revisions.
 One process-wide file lock prevents two qualification invocations from racing the registry, state reconciliation, or cleanup.
@@ -62,15 +62,15 @@ After that change, rerun the same public qualification command.
 ## Select a GPU
 
 ```bash
-UG_GPU_INDEX=1 bash scripts/run_cuda_pm_qualification.sh
+UG_GPU_INDEX=1 bash scripts/run_gpu_qualification.sh
 ```
 
-CI also sets `UG_EXPECTED_GPU_UUID` so a scheduler or topology change cannot silently select a different device.
+Set `UG_EXPECTED_GPU_UUID` when invoking the lower-level runner directly so a scheduler or topology change cannot silently select a different device.
 
 ## Stop after one step
 
 ```bash
-UG_THROUGH_STEP=profiles bash scripts/run_cuda_pm_qualification.sh
+UG_THROUGH_STEP=profiles bash scripts/run_gpu_qualification.sh
 ```
 
 Valid step names appear at the bottom of the runner script.
@@ -82,7 +82,7 @@ Both the early probe and the focused post-benchmark profile search both Nsight C
 ## Run the trusted smoke path
 
 ```bash
-UG_SMOKE_ONLY=1 bash scripts/run_cuda_pm_qualification.sh
+UG_SMOKE_ONLY=1 bash scripts/run_gpu_qualification.sh
 ```
 
 The smoke path locks the environment, materializes the frozen corpora, compiles both workers, runs CTest, builds a standard candidate engine, executes two transformer shapes, and executes the plugin tail shape 20 times.
@@ -93,7 +93,7 @@ Compute Sanitizer controls and worker SBOM validation also complete before the l
 
 ## Verify completion
 
-The final success line names `.upgrade-guard/cuda-pm/runs/<commit>/evidence.json`.
+The final success line names `.upgrade-guard/qualification/runs/<commit>/evidence.json`.
 Inspect its `source_git_commit`, `gpu_uuid`, `matrix_lock_sha256`, `environment_images`, `gate_status`, and artifact hashes before publishing a result.
 
 An infrastructure failure, timeout, unsupported tool, or inconclusive statistical result is not a passing qualification.

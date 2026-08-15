@@ -628,7 +628,7 @@ def _report_model(
             "sanitizers_and_profiles": "results.json#/profile_validation",
         },
         "reproduction_commands": [
-            ["bash", "scripts/run_cuda_pm_qualification.sh"],
+            ["bash", "scripts/run_gpu_qualification.sh"],
             [
                 "upgrade-guard",
                 "qualify",
@@ -636,7 +636,7 @@ def _report_model(
                 "--project-root",
                 ".",
                 "--out",
-                ".upgrade-guard/cuda-pm/manual-run",
+                ".upgrade-guard/qualification/manual-run",
             ],
         ],
         "methodology": [
@@ -845,7 +845,7 @@ def _failed_publication(
         corpus_provenance=(corpus_reference,),
         results_artifact=results_reference,
         measured_sections={"terminal_failure": "results.json#/failure_evidence"},
-        reproduction_commands=(("bash", "scripts/run_cuda_pm_qualification.sh"),),
+        reproduction_commands=(("bash", "scripts/run_gpu_qualification.sh"),),
         methodology=(
             "Completed steps are accepted only through hash-addressed markers.",
             "A typed domain failure terminates unrelated qualification work and remains resumable.",
@@ -1044,7 +1044,7 @@ def _markdown_report(payload: dict[str, Any], values: dict[str, dict[str, Any]])
         "claims. Preinstalled proprietary and operating-system packages are inventoried but "
         "are not claimed vulnerability-free.\n\n"
         "## Reproduction and trust\n\n"
-        "Run bash scripts/run_cuda_pm_qualification.sh to resume the full qualification. "
+        "Run bash scripts/run_gpu_qualification.sh to resume the full qualification. "
         "Review source hashes before granting source trust, and do not execute unreviewed "
         "bundled scripts, engines, containers, or profiler artifacts.\n"
     )
@@ -1274,7 +1274,7 @@ def generate(state: Path, output: Path) -> None:
         "dependency_audit_counts": dependency_audit_counts,
         "dependency_triage": dependency_triage,
         "reproduction": {
-            "qualification_command": ["bash", "scripts/run_cuda_pm_qualification.sh"],
+            "qualification_command": ["bash", "scripts/run_gpu_qualification.sh"],
             "bundles": values["reduction_replay"]["clean_bundles"],
         },
     }

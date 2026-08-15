@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-RUNNER = Path("scripts/run_cuda_pm_qualification.sh")
+RUNNER = Path("scripts/run_gpu_qualification.sh")
 KERNEL_BENCHMARK = Path("cpp/tests/kernel_benchmark.cu")
 GPU_FAULTS = Path("cpp/faults/gpu_faults.cu")
 

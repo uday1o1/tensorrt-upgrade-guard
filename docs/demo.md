@@ -23,7 +23,7 @@ On an unsupported host, highlight the stable fail-closed result instead of prese
 ## Start the GPU smoke path
 
 ```bash
-UG_SMOKE_ONLY=1 bash scripts/run_cuda_pm_qualification.sh
+UG_SMOKE_ONLY=1 bash scripts/run_gpu_qualification.sh
 ```
 
 Explain that the script resolves exact images, compiles the plugin in both workers, runs CTest, builds one candidate engine, and executes one bounded case.
@@ -31,7 +31,7 @@ Explain that the script resolves exact images, compiles the plugin in both worke
 ## Show the full evidence boundary
 
 ```bash
-run_root=".upgrade-guard/cuda-pm/runs/$(git rev-parse HEAD)"
+run_root=".upgrade-guard/qualification/runs/$(git rev-parse HEAD)"
 uv run --frozen upgrade-guard qualify qualification/full.yaml \
   --project-root . --out "${run_root}"
 ```
@@ -39,4 +39,4 @@ uv run --frozen upgrade-guard qualify qualification/full.yaml \
 The same command resumes source-revision-specific work and ends only after correctness, determinism, unprofiled performance, seeded faults, sanitizer, profiles, SBOMs, dependency audit, and final evidence succeed.
 
 Do not show a fabricated timing or GPU pass.
-Use `.upgrade-guard/cuda-pm/runs/<commit>/evidence.json` only after the real run completes.
+Use `.upgrade-guard/qualification/runs/<commit>/evidence.json` only after the real run completes.

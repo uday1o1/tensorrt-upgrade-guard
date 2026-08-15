@@ -4,7 +4,7 @@ set -Eeuo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${PROJECT_ROOT}/scripts/bounded_executor.sh"
 SOURCE_ID="$(git -C "${PROJECT_ROOT}" rev-parse HEAD)"
-STATE_BASE="${PROJECT_ROOT}/.upgrade-guard/cuda-pm"
+STATE_BASE="${PROJECT_ROOT}/.upgrade-guard/qualification"
 SMOKE_ONLY="${UG_SMOKE_ONLY:-0}"
 SANITIZER_ONLY="${UG_SANITIZER_ONLY:-0}"
 if [[ "${SMOKE_ONLY}" == "1" && "${SANITIZER_ONLY}" == "1" ]]; then
@@ -94,7 +94,7 @@ failure_report() {
     python3 scripts/write_failure_diagnostic.py "${diagnostic_arguments[@]}" \
       >/dev/null 2>&1 || true
     printf 'FAILED step=%s exit=%s\n' "${CURRENT_STEP}" "${exit_code}" >&2
-    printf 'Resume with: bash scripts/run_cuda_pm_qualification.sh\n' >&2
+    printf 'Resume with: bash scripts/run_gpu_qualification.sh\n' >&2
   elif [[ ${exit_code} -eq 1 ]]; then
     printf 'QUALIFICATION_FAILED report=%s\n' "${STATE_ROOT}/report.md" >&2
   fi
