@@ -5,7 +5,7 @@ UpgradeGuard stores repetition-level output hashes and input hashes before it su
 
 ## Decisions
 
-`NONDETERMINISTIC_OUTPUT` applies when repeated outputs differ beyond the authored tolerance.
+`NONDETERMINISM_REGRESSION` applies when repeated outputs differ beyond the authored tolerance.
 Bitwise equality can be required for cases that declare it.
 
 Input hashes must remain identical across repetitions.

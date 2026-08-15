@@ -37,12 +37,17 @@ One process-wide file lock prevents two qualification invocations from racing th
 
 ## Resume after a failure
 
-Fix the reported external prerequisite or implementation defect, keep the same source revision when appropriate, and run the same command again.
+For an external prerequisite failure, correct the prerequisite without changing the source revision and run the same command again.
+
+For an implementation defect, fix the defect, run `make verify`, commit the coherent fix locally, and derive a new run root from the new clean `HEAD` before qualifying that revision.
 
 ```bash
+run_root=".upgrade-guard/qualification/runs/$(git rev-parse HEAD)"
 uv run --frozen upgrade-guard qualify qualification/full.yaml \
   --project-root . --out "${run_root}"
 ```
+
+Push the local `main` commit directly to `origin/main` after the new revision reaches its truthful qualification stopping point.
 
 The runner skips only a step whose versioned marker, complete file inventory, selected GPU, mode, source commit, direct dependency markers, matrix lock, and corpus identities all verify.
 Invalid or incomplete owned outputs move under the source run's `stale/` lineage before the step reruns.

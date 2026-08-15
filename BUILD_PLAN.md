@@ -37,8 +37,9 @@ uv run --frozen upgrade-guard qualify qualification/full.yaml \
   --project-root . --out "${run_root}"
 ```
 
-If the target run exposes an implementation defect, fix only the failing boundary, rerun `make verify`, resume the same qualification command, and preserve the generated hardware evidence outside Git.
-After a coherent fix passes, commit and push directly to `main` with ordinary `git add`, `git commit`, and `git push origin main` commands.
+If the target run exposes only an external prerequisite failure, correct the prerequisite and resume the same qualification command from the unchanged clean source revision.
+If it exposes an implementation defect, fix only the failing boundary, rerun `make verify`, commit the coherent fix locally, recompute `run_root` from the new `HEAD`, and start or resume qualification for that new clean revision.
+After the new revision reaches its truthful qualification stopping point, push the local `main` commit directly with `git push origin main` and preserve generated hardware evidence outside Git.
 
 ## 2. Product definition
 
